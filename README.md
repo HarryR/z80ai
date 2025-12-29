@@ -8,24 +8,7 @@ The answer is Yes! And a 40kb .com binary (including inference, weights & a chat
 
 It won't pass the Turing test, but it might make you smile at the green screen.
 
-## Quick Start
-
-```bash
-# Run with CP/M emulator
-cpm CHAT.COM hello there
-
-# Or interactive mode (no args, ! to exit):
-cpm CHAT.COM
-> hello
-HI
-> are you real
-MAYBE
-> are you a bot
-YES
-> !
-```
-
-To train your own model, see [TRAINING.md](TRAINING.md).
+For insight on how to best train your own model, see [TRAINING.md](TRAINING.md).
 
 ## Examples
 
