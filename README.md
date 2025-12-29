@@ -27,6 +27,42 @@ YES
 
 To train your own model, see [TRAINING.md](TRAINING.md).
 
+## Examples
+
+Two pre-built examples are included:
+
+### [tinychat](examples/tinychat/)
+
+A conversational chatbot trained on casual Q&A pairs. Responds to greetings, questions about itself, and general banter with terse personality-driven answers.
+
+```
+> hello
+HI
+> are you a robot
+YES
+> do you dream
+MAYBE
+```
+
+### [guess](examples/guess/)
+
+A 20 Questions game where the model knows a secret topic and answers YES/NO/MAYBE to your questions. Guess correctly to WIN.
+
+```
+> is it alive
+YES
+> is it big
+YES
+> does it have a trunk
+YES
+> is it grey
+MAYBE
+> elephant
+WIN
+```
+
+Includes tools for generating training data with LLMs (Ollama or Claude API) and balancing class distributions.
+
 ## Features
 
 - **Trigram hash encoding**: Input text is hashed into 128 buckets - typo-tolerant, word-order invariant
