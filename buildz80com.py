@@ -35,7 +35,11 @@ def pack_2bit_weights(weights: np.ndarray) -> bytes:
         chunk = mapped[i:i+4]
         if len(chunk) < 4:
             chunk = np.pad(chunk, (0, 4 - len(chunk)), constant_values=2)
-        byte = int(chunk[0]) | (int(chunk[1]) << 2) | (int(chunk[2]) << 4) | (int(chunk[3]) << 6)
+        byte = \
+            (int(chunk[2]) << 6) | \
+            (int(chunk[1]) << 4) | \
+            (int(chunk[0]) << 2) | \
+            (int(chunk[3])) # chunk 3 as last since in the evaluation there will be first a rotation
         packed.append(byte)
 
     return bytes(packed)
@@ -424,105 +428,94 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
             b.jp('LAYER')
 
     # === LAYER (same as build_nn.py) ===
-    b.label('LAYER')
-    b.ld_mem_label_bc('SAVCNT')
-    b.ld_mem_label_hl('SAVW')
-    b.ld_mem_label_de('SAVB')
-
-    b.label('LNEUR')
-    b.push_bc()
-    b.ld_hl_nn(0)
-    b.ld_mem_label_hl('ACC')
-    b.push_ix()
-    b.pop_hl()
-    b.ld_mem_label_hl('CURIN')
-    b.ld_hl_mem_label('SAVW')
-    b.ld_a_mem_label('SAVCNT')
-    b.ld_b_a()
-    b.ld_c_n(0)
-
-    b.label('LWT')
-    b.push_bc()
-    b.ld_a_c()
-    b.and_n(0x03)
-    b.jr_nz('LSAME')
-    b.ld_hl_mem_label('SAVW')
-    b.ld_a_hl()
-    b.ld_mem_label_a('PACKED')
-    b.inc_hl()
-    b.ld_mem_label_hl('SAVW')
-
-    b.label('LSAME')
-    b.ld_a_mem_label('PACKED')
-    b.and_n(0x03)
-    b.sub_n(2)
-    b.ld_mem_label_a('WEIGHT')
-    b.ld_a_mem_label('PACKED')
-    b.rrca()
-    b.rrca()
-    b.ld_mem_label_a('PACKED')
-    b.ld_hl_mem_label('CURIN')
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.inc_hl()
-    b.ld_mem_label_hl('CURIN')
-    b.ld_a_mem_label('WEIGHT')
-    b.call('MULADD')
-    b.pop_bc()
-    b.inc_c()
-    b.djnz('LWT')
-
-    b.ld_hl_mem_label('SAVB')
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.inc_hl()
-    b.ld_mem_label_hl('SAVB')
-    b.ld_hl_mem_label('ACC')
-    b.add_hl_de()
-    b.ld_mem_label_hl('ACC')
-    b.sra_h()
-    b.rr_l()
-    b.sra_h()
-    b.rr_l()
-    b.ld_iyd_l(0)
-    b.ld_iyd_h(1)
-    b.inc_iy()
-    b.inc_iy()
-    b.pop_bc()
-    b.dec_b()
-    b.jp_nz('LNEUR')
-    b.ret()
-
-    # === MULADD ===
-    b.label('MULADD')
-    b.or_a()
-    b.jr_z('MA_RET')
-    b.jp_m('MA_NEG')
-    b.ld_hl_mem_label('ACC')
-    b.add_hl_de()
-    b.ld_mem_label_hl('ACC')
-    b.ret()
-
-    b.label('MA_NEG')
-    b.cp_n(0xFF)
-    b.jr_z('MA_N1')
-    b.ld_hl_mem_label('ACC')
-    b.or_a()
-    b.sbc_hl_de()
-    b.sbc_hl_de()
-    b.ld_mem_label_hl('ACC')
-    b.ret()
-
-    b.label('MA_N1')
-    b.ld_hl_mem_label('ACC')
-    b.or_a()
-    b.sbc_hl_de()
-    b.ld_mem_label_hl('ACC')
-
-    b.label('MA_RET')
-    b.ret()
+    b.label('LAYER')            # LAYER:                                          
+    b.ld_mem_label_bc('SAVCNT') #   ld (SAVCNT), bc                             
+    b.ld_mem_label_hl('SAVW')   #   ld (SAVW), hl                           
+    b.ld_mem_label_de('SAVB')   #   ld (SAVB), de                           
+                                # 
+    b.label('LNEUR')            # LNEUR:                    
+    b.push_bc()                 #   push bc             
+    b.ld_hl_nn(0)               #   ld hl, 0               
+    b.ld_mem_label_hl('ACC')    #   ld (ACC), hl                          
+    b.push_ix()                 #   push ix             
+    b.pop_hl()                  #   pop hl            
+    b.ld_mem_label_hl('CURIN')  #   ld (CURIN), hl                              
+    b.ld_hl_mem_label('SAVW')   #   ld hl, (SAVW)                           
+    b.ld_a_mem_label('SAVCNT')  #   ld a, (SAVCNT)                            
+    b.ld_b_a()                  #   ld b, a            
+    b.ld_c_n(0)                 #   ld c, 0             
+                                # 
+    b.label('LWT')              # LWT:                  
+    b.ld_a_c()                  #   ld a,c            
+    b.and_n(0x03)               #   and 11b               
+    b.jr_nz('LSAME')            #   jr nz, LSAME                  
+    b.ld_hl_mem_label('SAVW')   #   ld hl, (SAVW)                           
+    b.ld_a_hl()                 #   ld a, (hl)             
+    b.ld_mem_label_a('PACKED')  #   ld (PACKED), a                            
+    b.inc_hl()                  #   inc hl            
+    b.ld_mem_label_hl('SAVW')   #   ld (SAVW), hl                           
+                                # 
+    b.label('LSAME')            # LSAME:
+                                #   ; Unpack 2-bit weight from packed byte                    
+    b.ld_a_mem_label('PACKED')  #   ld a, (PACKED) ; Get packed weights                           
+    b.rrca()                    #   rrca ; Rotate for next weight          
+    b.rrca()                    #   rrca          
+    b.ld_mem_label_a('PACKED')  #   ld (PACKED),a
+    b.and_n(0x03)               #   and 11b        ; Mask bottom 2 bits       
+                                #   ; 0,1,2,3 will be considered -2,-1,0,+1 in MULADD  
+    b.ld_hl_mem_label('CURIN')  #   ld hl, (CURIN)                            
+    b.ld_e_hl()                 #   ld e, (hl)             
+    b.inc_hl()                  #   inc hl            
+    b.ld_d_hl()                 #   ld d, (hl)             
+    b.inc_hl()                  #   inc hl            
+    b.ld_mem_label_hl('CURIN')  #   ld (CURIN), hl                            
+    b.call('MULADD')            #   call MULADD                  
+    b.inc_c()                   #   inc c           
+    b.djnz('LWT')               #   djnz LWT               
+                                # 
+    b.ld_hl_mem_label('SAVB')   #   ld hl, (SAVB)                           
+    b.ld_e_hl()                 #   ld e, (hl)             
+    b.inc_hl()                  #   inc hl            
+    b.ld_d_hl()                 #   ld d, (hl)             
+    b.inc_hl()                  #   inc hl            
+    b.ld_mem_label_hl('SAVB')   #   ld (SAVB), hl                           
+    b.ld_hl_mem_label('ACC')    #   ld hl, (ACC)                          
+    b.add_hl_de()               #   add hl, de               
+    b.ld_mem_label_hl('ACC')    #   ld (ACC), hl
+                                #   ; After each layer, arithmetic right-shift by 2 to prevent overflow                          
+    b.sra_h()                   #   sra h          ; Shift right arithmetic (preserves sign)    
+    b.rr_l()                    #   rr l          
+    b.sra_h()                   #   sra h           
+    b.rr_l()                    #   rr l           ; ACC = ACC / 4
+    b.ld_iyd_l(0)               #   ld (iy+0), l                
+    b.ld_iyd_h(1)               #   ld (iy+1), h              
+    b.inc_iy()                  #   inc iy            
+    b.inc_iy()                  #   inc iy            
+    b.pop_bc()                  #   pop bc            
+    b.djnz('LNEUR')             #   dec b : jp nz, LNEUR                  
+    b.ret()                     #   ret         
+                                # 
+    # === MULADD ===            #                     
+    # a is 0,1,2,3 that are as -2,-1,0,+1
+    b.label('MULADD')           # MULADD:                     
+    # TODO: ACC should be put in a register
+    b.ld_hl_mem_label('ACC')    #   ld hl, (ACC)                          
+    b.dec_a()                   #   dec a          
+    b.jr_z('MA_M1')             #   jr z, MA_M1 ; jump if a is -1 equivalent
+    b.dec_a()                   #   dec a          
+    b.ret_z()                   #   ret z ; a is zero equivalent
+    b.dec_a()                   #   dec a          
+    b.jr_z('MA_P1')             #   jr z, MA_P1 ; jump if a is +1 equivalent
+    b.label('MA_M2')            # MA_M2: ; a is -2 equivalent                    
+    b.sbc_hl_de()               #   sbc hl, de              
+    b.label('MA_M1')            # MA_M1: ; -1                   
+    b.sbc_hl_de()               #   sbc hl, de               
+    b.ld_mem_label_hl('ACC')    #   ld (ACC), hl                          
+    b.ret()                     #   ret         
+    b.label('MA_P1')            # MA_P1: ; a is +1                     
+    b.add_hl_de()               #   add hl, de               
+    b.ld_mem_label_hl('ACC')    #   ld (ACC), hl                          
+    b.ret()                     #   ret         
 
     # === ReLU stubs ===
     for i in range(num_layers - 1):
