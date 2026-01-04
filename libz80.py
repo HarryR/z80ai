@@ -72,6 +72,8 @@ class Z80Builder:
     def ret_nz(self): self.emit(0xC0)  # RET NZ
     def rst(self, n): self.emit(0xC7 | n)
     def halt(self): self.emit(0x76)
+    def di(self): self.emit(0xF3)
+    def ei(self): self.emit(0xFB)
 
     def call(self, label: str):
         self.emit(0xCD)
@@ -165,6 +167,18 @@ class Z80Builder:
         self.emit(0xED, 0x43)
         self.fixup_word(label)
 
+    def ld_bc_mem_label(self, label: str):
+        self.emit(0xED, 0x4B)
+        self.fixup_word(label)
+
+    def ld_mem_label_sp(self, label: str):
+        self.emit(0xED, 0x73)
+        self.fixup_word(label)
+
+    def ld_sp_mem_label(self, label: str):
+        self.emit(0xED, 0x7B)
+        self.fixup_word(label)
+
     def ld_a_mem_label(self, label: str):
         self.emit(0x3A)
         self.fixup_word(label)
@@ -173,6 +187,8 @@ class Z80Builder:
         self.emit(0x32)
         self.fixup_word(label)
 
+    def ld_a_bc(self): self.emit(0x0A)
+    def ld_a_de(self): self.emit(0x1A)
     def ld_a_hl(self): self.emit(0x7E)
     def ld_hl_a(self): self.emit(0x77)
     def ld_e_hl(self): self.emit(0x5E)
@@ -182,13 +198,22 @@ class Z80Builder:
     def ld_a_l(self): self.emit(0x7D)
     def ld_a_d(self): self.emit(0x7A)
     def ld_b_a(self): self.emit(0x47)
+    def ld_b_c(self): self.emit(0x41)
     def ld_c_a(self): self.emit(0x4F)
     def ld_d_a(self): self.emit(0x57)
     def ld_a_c(self): self.emit(0x79)
     def ld_e_a(self): self.emit(0x5F)
 
+    def ld_l_ixd(self, d): self.emit(0xDD, 0x6E, d & 0xFF)  # LD L,(IX+d)
+    def ld_h_ixd(self, d): self.emit(0xDD, 0x66, d & 0xFF)  # LD H,(IX+d)
+    def ld_ixd_l(self, d): self.emit(0xDD, 0x75, d & 0xFF)  # LD (IX+d),L
+    def ld_ixd_h(self, d): self.emit(0xDD, 0x74, d & 0xFF)  # LD (IX+d),H
     def ld_iyd_l(self, d): self.emit(0xFD, 0x75, d & 0xFF)  # LD (IY+d),L
     def ld_iyd_h(self, d): self.emit(0xFD, 0x74, d & 0xFF)  # LD (IY+d),H
+
+    def ld_sp_hl(self): self.emit(0xF9)
+    def ld_sp_ix(self): self.emit(0xDD, 0xF9)
+    def ld_sp_iy(self): self.emit(0xFD, 0xF9)
 
     # Arithmetic
     def add_a_n(self, val): self.emit(0xC6, val & 0xFF)
@@ -200,10 +225,14 @@ class Z80Builder:
     def add_hl_de(self): self.emit(0x19)
     def sbc_hl_de(self): self.emit(0xED, 0x52)
     def sbc_hl_bc(self): self.emit(0xED, 0x42)  # SBC HL,BC
+    def inc_bc(self): self.emit(0x03)
+    def dec_bc(self): self.emit(0x0B)
     def inc_hl(self): self.emit(0x23)
     def dec_hl(self): self.emit(0x2B)
     def inc_c(self): self.emit(0x0C)
+    def dec_c(self): self.emit(0x0D)
     def dec_b(self): self.emit(0x05)
+    def inc_ix(self): self.emit(0xDD, 0x23)
     def inc_iy(self): self.emit(0xFD, 0x23)
 
     # Shifts
@@ -215,6 +244,8 @@ class Z80Builder:
     def rl_h(self): self.emit(0xCB, 0x14)
     def add_hl_hl(self): self.emit(0x29)  # HL = HL * 2
     def add_hl_bc(self): self.emit(0x09)  # HL = HL + BC
+    def add_hl_de(self): self.emit(0x19)  # HL = HL + DE
+    def add_hl_sp(self): self.emit(0x39)  # HL = HL + SP
 
     # Bit
     def bit_7_d(self): self.emit(0xCB, 0x7A)
@@ -265,6 +296,10 @@ class Z80Builder:
 
     # Exchange
     def ex_de_hl(self): self.emit(0xEB)
+    def ex_sp_hl(self): self.emit(0xE3)
+    def ex_sp_ix(self): self.emit(0xDD, 0xE3)
+    def ex_sp_iy(self): self.emit(0xFD, 0xE3)
+    def ex_af_af(self): self.emit(0x08)
 
     # Data
     def db(self, *vals):
