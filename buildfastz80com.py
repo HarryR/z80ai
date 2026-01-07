@@ -13,20 +13,38 @@ This generates Z80 machine code for character-by-character text generation:
    e. Update context encoding with new character
    f. Repeat until EOS or max length
 
-Like buildz80com.py but uses a skip list for each non-zero weight.  That costs
+Like buildz80com.py but uses indices for for each non-zero weight.  That costs
 a smidge over 1 byte per weight but since close to 75% of the weights are zero
-it tends to be only about 5 more KB.
+it tends to be only about 5 more KB.  Also, the input and output values are
+stored in split form in 256 byte aligned buffers.  Instead of the low byte of
+a value being in the next byte, it is 256 bytes away.  Normally loading a 16
+bit value pointed to be HL goes like this:
+    ld   e,(hl)
+    inc  hl
+    ld   d,(hl)
+    inc  hl
+With split values the sequence is:
+    ld   e,(hl)
+    inc  h
+    ld   d,(hl)
+    dec  h
+    inc  l
+Awkward, but worth it when mapping an index to a value is "ld l,c" instead
+of "ld b,0; sla c; rl b; add hl,bc"  And by using the stack pointer step
+through the weights forces a very beneficial unrolling by 2 of the summation
+loop.
 
 Advantages:
-    Close to 10 times faster than the packed weights version.
+    Close to 20 times faster than the packed weights version and over
+    twice as fast as the skip list version.
 
 Disadvantages:
     May produce a .com file too large if zero weights are less common.
     Uses the stack pointer with interrupts disabled.
-	Packed weight version could be considerably faster.
+    Packed weight version could be considerably faster.
 
 Would make sense to combine these into a single version which chooses the
-fastest version.
+fastest version that fits.
 
 """
 
@@ -41,23 +59,34 @@ CPM_CMDLINE = 0x0080
 MAX_OUTPUT_LEN = 50  # Maximum characters to generate
 
 
-def skip_list_weights(weights: np.ndarray) -> bytes:
-    """Convert weights into skip lists."""
-    skip = []
+def pack_weights_and_biases(weights: np.ndarray, biases: np.ndarray) -> bytes:
+    """Convert weights into index lists by weight and append bias after"""
+    """each node."""
+    wt_bias = []
     for n in range(0, weights.shape[0]):
         flat = np.clip(weights[n], -2, 1).astype(np.int8)
         for w in [ -2, -1, 1 ]:
-            base = 0
-            step = []
+            indices = []
             for i in range(0, len(flat)):
                 if flat[i] == w:
-                    step.append(i - base)
-                    base = i + 1
+                    indices.append(i)
 
-            skip.append(len(step))
-            skip += step
+            wt_bias.append(len(indices))
+            wt_bias += indices
+        wt_bias.append(int(int(biases[n] & 0xFFFF) % 256))
+        wt_bias.append(int(int(biases[n] & 0xFFFF) / 256))
 
-    return bytes(skip)
+    return bytes(wt_bias)
+
+
+def sum_wt(b: Z80Builder, w: int):
+   if w > 0: b.add_a_hl()
+   if w < 0: b.sub_a_hl()
+
+
+def sum_wt_carry(b: Z80Builder, w: int):
+   if w > 0: b.adc_a_hl()
+   if w < 0: b.sbc_a_hl()
 
 
 def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
@@ -106,11 +135,9 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     print(f"Output: {output_size} characters")
 
     # Pack weights and biases
-    skip_weights = []
-    biases = []
+    weights_biases = []
     for name in layer_names:
-        skip_weights.append(skip_list_weights(params[f'{name}_weight']))
-        biases.append(params[f'{name}_bias'])
+        weights_biases.append(pack_weights_and_biases(params[f'{name}_weight'], params[f'{name}_bias']))
 
     b = Z80Builder()
 
@@ -190,11 +217,26 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.ld_mem_label_a('GENCNT')
 
     b.label('GENLOOP')
+
+    # Copy INBUF to BUF_A, splitting values as we go
+
+    b.ld_hl_label('INBUF')
+    b.ld_de_label('BUF_A')
+    b.label('INTOA')
+    b.ld_a_hl()
+    b.inc_hl()
+    b.ld_de_a()
+    b.ld_a_hl()
+    b.inc_hl()
+    b.inc_d()
+    b.ld_de_a()
+    b.dec_d()
+    b.inc_e()
+    b.jr_nz('INTOA')
+
     # Run inference through all layers
-    for i in range(num_layers):
-        b.call(f'LAYER{i+1}')
-        if i < num_layers - 1:
-            b.call(f'RELU{i+1}')
+    b.ld_hl_label('NETWORK')
+    b.call('INFER')
 
     # Find best character
     b.call('ARGMAX')
@@ -407,160 +449,203 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.label('CLEAR_CTX')
     # Set CTXCHARS to 8 spaces
     b.ld_hl_label('CTXCHARS')
-    b.ld_a_n(ord(' '))
-    for _ in range(8):
-        b.ld_hl_a()
-        b.inc_hl()
+    b.ld_b_n(8)
+    b.label('CLR_LP')
+    b.ld_hl_n(ord(' '))
+    b.inc_hl()
+    b.djnz('CLR_LP')
 
     # Encode the initial spaces into context buckets
     b.jp('ENCODE_CTX')  # This will return for us
 
-    # === Generate layer dispatch stubs ===
-    for i in range(num_layers):
-        in_size = layer_sizes[i]
-        out_size = layer_sizes[i + 1]
+    # === Inference Evaluation ===
+    # HL points to NETWORK:
+    #    1 byte   number of layers
+    # Followed by the layers which are:
+    #    1 byte   number of output values
+    #    weight + bias data
+    #
+    # From this we load:
+    #    E   number of layers
+    #    D   number of outputs of layer
+    #    HL  output buffer (only needs high byte)
+    #    HL' input buffer
+    # On return:
+    #    B   number of outputs of last layer
+    #    HL' last output buffer
 
-        if i == 0:
-            in_buf = 'INBUF'
-        else:
-            in_buf = 'BUF_A' if (i % 2 == 1) else 'BUF_B'
+    b.label('INFER');
 
-        if i == num_layers - 1:
-            out_buf = 'OUTBUF'
-        else:
-            out_buf = 'BUF_A' if ((i + 1) % 2 == 1) else 'BUF_B'
+    b.ld_e_hl() # number of layers
+    b.inc_hl()
 
-        b.label(f'LAYER{i+1}')
-        b.ld_hl_label(f'WTS{i+1}')
-        b.ld_de_label(f'BIAS{i+1}')
-        b.ld_ix_label(in_buf)
-        b.ld_iy_label(out_buf)
-        b.ld_b_n(out_size if out_size <= 255 else 0)
-        b.ld_c_n(in_size if in_size <= 255 else 0)
-        if i == num_layers - 1:
-            pass  # Fall through
-        else:
-            b.jp('LAYER')
-
-    # === LAYER (same as build_nn.py) ===
-    b.label('LAYER')
-    # HL=weights as skips, DE=bias, IX=IN, C=LEN(IN) IY=OUT, B=LEN(OUT)
-
-    b.ld_mem_label_hl('WTSAV')
-
-    b.label('LNEUR')
-    b.push_bc() # save LEN(OUT)
-    b.push_de() # save BIAS
-
-    b.ld_bc_mem_label('WTSAV');
     b.ld_mem_label_sp('SPSAV')
     b.di()
-    b.ld_de_nn(0) # accumulator = 0
+
+    b.ld_sp_hl() # rest of the network data
+
+    b.ld_hl_label('BUF_B') # output buffer
+    b.exx()
+    b.ld_hl_label('BUF_A') # input buffer
+    b.exx()
+
+    b.label('LAYER_LOOP')
+
+    b.dec_sp()
+    b.pop_af() # A = number of outputs
+    b.ld_d_a() # now in D
+    b.ld_b_a() # will be last ouput size for ARGMAX
+
+    # SP=weights + biases, HL'=IN, HL=OUT, D=LEN(OUT), E=# of layers
+
+    b.dec_e() # decrement so easier to test for E=1 in ReLU check
+
+    b.label('LNEUR')
+
+    b.exx()
+    b.xor_a()
+    b.ld_c_a() # accumulator = 0
     for w in [-2, -1, 1]:
-        b.ld_a_bc()
-        b.inc_bc()
-        b.or_a()
+        b.pop_de() # E = number of weight indices, D = first weight
+        b.srl_e()
+        b.jr_nc(f"even{w+2}") # no carry means even number of weights
+        # Calculate the D weight we have
+        b.ld_l_d()
+        sum_wt(b, w)
+        b.ld_d_a()
+        b.inc_h()
+        b.ld_a_c()
+        sum_wt_carry(b, w)
+        b.ld_c_a()
+        b.ld_a_d()
+        b.dec_h()
+        b.inc_e()
+        b.dec_e()
+        b.db(0x16) # ld d,n (to skip adjustment of stack pointer)
+        b.label(f"even{w+2}")
+        b.dec_sp() # read 1 byte too much, back off
         b.jr_z(f"skip{w+2}")
-        b.ld_sp_ix() # IN
-        b.label(f"w{w+2}")
-        b.ex_af_af()
-        b.ld_a_bc()
-        b.inc_bc()
-        b.ld_h_n(0)
-        b.ld_l_a()
-        b.add_hl_hl()
-        b.add_hl_sp()
-        b.ld_sp_hl()
-        b.pop_hl()
-        if w == 1:
-            b.add_hl_de()
-        if w == -1:
-            b.ex_de_hl()
-            b.or_a()
-            b.sbc_hl_de()
+        b.ld_b_e()
+        b.label(f"wt{w+2}")
+        b.pop_de()
+        b.ld_l_e()
+        sum_wt(b, w)
+        b.ld_e_a()
+        b.inc_h()
+        b.ld_a_c()
+        sum_wt_carry(b, w)
+        b.ld_l_d()
+        sum_wt(b, w)
+        b.ld_c_a()
+        b.dec_h()
+        b.ld_a_e()
+        sum_wt(b, w)
+        b.jr_nc(f"c_ok{w+2}")
+        if w > 0: b.inc_c()
+        if w < 0: b.dec_c()
+        b.label(f"c_ok{w+2}")
+        b.djnz(f"wt{w+2}")
         if w == -2:
-            b.add_hl_hl()
-            b.ex_de_hl()
-            b.or_a()
-            b.sbc_hl_de()
-        b.ex_de_hl()
-        b.ex_af_af()
-        b.dec_a()
-        b.jp_nz(f"w{w+2}")
+            b.add_a_a()
+            b.rl_c()
         b.label(f"skip{w+2}")
+
+    # Bias follows after weights
+    b.pop_de()
+    b.add_a_e()
+    b.ld_e_a()
+    b.ld_a_c()
+    b.adc_a_d()
+    b.ld_c_a()
+    b.ld_a_e()
+
+    # Scale output to keep within range.
+    b.sra_c()
+    b.rra()
+    b.sra_c()
+    b.rra()
+
+    # Check if ReLU desired
+    b.exx()
+    b.inc_e()
+    b.dec_e()
+    b.exx()
+    b.jr_z('NO_RELU')
+    b.bit_7_c()
+    b.jr_z('NO_RELU')
+    b.xor_a()
+    b.ld_c_a()
+    b.label('NO_RELU')
+
+    # write summation to output
+    b.exx()
+    b.ld_hl_a()
+    b.inc_h()
+    b.exx()
+    b.ld_a_c()
+    b.exx()
+    b.ld_hl_a()
+    b.dec_h()
+    b.inc_l()
+
+    # We're back in the regular registers
+    b.dec_d()
+    b.jp_nz('LNEUR')
+
+    # Swap input and output buffers.  Could be done with an XOR to each H.
+    # Also need to zero L
+    # Or, considering only B and and E are live, just EXX and pull them over.
+    # And B is just being cute, really.
+    b.ld_l_n(0)
+    b.ld_a_h() # A=H
+    b.exx()
+    b.ex_af_af()
+    b.ld_l_n(0)
+    b.ld_a_h() # A'=H'
+    b.ex_af_af()
+    b.ld_h_a() # H'=A (=H)
+    b.exx()
+    b.ex_af_af()
+    b.ld_h_a() # H=A' (=H')
+
+    b.inc_e() # was -1 as ReLU flag
+    b.dec_e()
+    b.jp_nz('LAYER_LOOP')
 
     b.ld_sp_mem_label('SPSAV')
     b.ei()
-    b.ld_mem_label_bc('WTSAV');
-    b.ex_sp_ix() # save IX, IX=BIAS
-    b.ld_l_ixd(0)
-    b.ld_h_ixd(1)
-    b.inc_ix()
-    b.inc_ix()
-    b.add_hl_de()
-    b.sra_h()
-    b.rr_l()
-    b.sra_h()
-    b.rr_l()
-    b.ld_iyd_l(0)
-    b.ld_iyd_h(1)
-    b.inc_iy()
-    b.inc_iy()
-    b.ex_sp_ix() # restore IX
-    
-    b.pop_de()
-    b.pop_bc()
-    b.dec_b()
-    b.jp_nz('LNEUR')
-    b.ret()
 
-    # === ReLU stubs ===
-    for i in range(num_layers - 1):
-        out_size = layer_sizes[i + 1]
-        buf_name = 'BUF_A' if ((i + 1) % 2 == 1) else 'BUF_B'
-
-        b.label(f'RELU{i+1}')
-        b.ld_hl_label(buf_name)
-        b.ld_b_n(out_size if out_size <= 255 else 0)
-        if i == num_layers - 2:
-            pass
-        else:
-            b.jr('RELU')
-
-    b.label('RELU')
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.bit_7_d()
-    b.jr_z('RPOS')
-    b.dec_hl()
-    b.xor_a()
-    b.ld_hl_a()
-    b.inc_hl()
-    b.ld_hl_a()
-    b.label('RPOS')
-    b.inc_hl()
-    b.djnz('RELU')
     b.ret()
 
     # === ARGMAX ===
+    # HL' = layer values, B = layer size.  Exactly what INFER returns with.
+    # Hastily fixed up for split values; code could be much improved.
+    # Especially if we work backwards so L is our counter (though beware how
+    # that could change things -- we should accept "=" to have same operation)
     b.label('ARGMAX')
-    b.ld_hl_label('OUTBUF')
+
+    b.ld_a_b()
+    b.exx()
+    b.ld_b_a()
+
     b.ld_e_hl()
-    b.inc_hl()
+    b.inc_h()
     b.ld_d_hl()
-    b.inc_hl()
+    b.dec_h()
+    b.inc_l()
+
     b.ld_mem_label_de('MAXV')
     b.xor_a()
     b.ld_mem_label_a('MAXI')
-    b.ld_b_n(output_size - 1)
     b.ld_c_n(1)
 
     b.label('AMLP')
     b.ld_e_hl()
-    b.inc_hl()
+    b.inc_h()
     b.ld_d_hl()
-    b.inc_hl()
+    b.dec_h()
+    b.inc_l()
+
     b.push_hl()
     b.ld_hl_mem_label('MAXV')
     b.push_de()
@@ -738,7 +823,6 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
 
     # Variables
     b.label('SPSAV'); b.dw(0)
-    b.label('WTSAV'); b.dw(0)
     b.label('MAXV'); b.dw(0)
     b.label('MAXI'); b.db(0)
     b.label('RESULT'); b.db(0)
@@ -756,21 +840,23 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.label('CHATLEN'); b.db(0)   # Actual chars read (filled by BDOS)
     b.label('CHATDAT'); b.ds(62)  # Input text buffer
 
-    # Buffers
-    b.label('INBUF'); b.ds(input_size * 2)  # 256 buckets * 2 bytes
-    max_hidden = max(layer_sizes[1:-1]) if len(layer_sizes) > 2 else layer_sizes[1]
-    b.label('BUF_A'); b.ds(max_hidden * 2)
-    b.label('BUF_B'); b.ds(max_hidden * 2)
-    b.label('OUTBUF'); b.ds(output_size * 2)
-
+    b.label('NETWORK')
+    b.db(num_layers)
     # Weights and biases
     for i in range(num_layers):
-        b.label(f'WTS{i+1}')
-        b.db(*skip_weights[i])
+        b.db(layer_sizes[i + 1])
+        b.db(*weights_biases[i])
 
-        b.label(f'BIAS{i+1}')
-        for v in biases[i]:
-            b.dw(int(v) & 0xFFFF)
+    # Buffers
+    b.align(256)
+    if input_size > 256:
+        raise ValueError(f"Input size {input_size} is too big; limit 256.")
+    b.label('INBUF'); b.ds(256 * 2)  # 256 buckets * 2 bytes
+    max_hidden = max(layer_sizes[1:-1]) if len(layer_sizes) > 2 else layer_sizes[1]
+    if max_hidden > 256:
+        raise ValueError(f"Layer size {max_hidden} is too big; limit 256.")
+    b.label('BUF_A'); b.ds(256 * 2)
+    b.label('BUF_B'); b.ds(256 * 2)
 
     return b
 
