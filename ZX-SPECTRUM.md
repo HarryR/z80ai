@@ -65,6 +65,25 @@ cd examples/guess
 
 Outputs: `GUESS.TAP`
 
+### Creating Z80 Snapshots (Optional)
+
+TAP files require loading with `LOAD "" CODE` each time. For faster testing, you can create a Z80 snapshot that starts immediately:
+
+```bash
+./buildz80snapshot.py CHAT.TAP --output CHAT.z80
+```
+
+Z80 snapshots (.z80, .sna) are memory dumps with the code pre-loaded. Just open them in an emulator and they run instantly at the entry point.
+
+**Advantages of Z80 snapshots:**
+- Instant startup (no LOAD "" CODE step)
+- Faster for development and testing
+- Preserves full system state
+
+**When to use TAP vs Z80:**
+- **TAP**: For real hardware, tape loading, authentic experience
+- **Z80**: For emulator testing, development, instant startup
+
 ## Loading and Running
 
 ### In an Emulator
@@ -88,6 +107,23 @@ Most ZX Spectrum emulators support TAP files:
 3. **Speccy** (Windows):
    - File → Open → Select CHAT.TAP
    - F3 to start tape
+
+#### Loading Z80 Snapshots
+
+Z80 snapshot files (.z80) load instantly without the LOAD step:
+
+1. **FUSE**:
+   ```bash
+   fuse CHAT.z80
+   ```
+   Program starts automatically at 0x8000
+
+2. **ZEsarUX**:
+   - File → Load → Select CHAT.z80
+   - Starts immediately
+
+3. **Most other emulators**:
+   - File → Open Snapshot → Select CHAT.z80
 
 ### On Real Hardware
 
