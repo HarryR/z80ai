@@ -56,6 +56,19 @@ Includes tools for generating training data with LLMs (Ollama or Claude API) and
 - **No floating point**: Everything is integer math with fixed-point scaling
 - **Interactive chat mode**: Just run `CHAT` with no arguments
 
+## Platform Support
+
+Z80-μLM runs on multiple Z80-based platforms:
+
+- **CP/M**: Original target platform. Generates `.COM` files using `buildz80com.py`
+- **ZX Spectrum 48K**: Full support via `buildz80tap.py`. See [ZX-SPECTRUM.md](ZX-SPECTRUM.md) for details
+  - Generates `.TAP` files for emulators or real hardware
+  - Uses ZX Spectrum ROM routines for I/O
+  - Memory optimized for 48K systems
+  - Compatible with most ZX Spectrum emulators
+
+For ZX Spectrum builds, use `run-zx.sh` in example directories or see the [ZX Spectrum guide](ZX-SPECTRUM.md).
+
 ## Interaction Style
 
 The model doesn't understand you. But somehow, it *gets* you.
