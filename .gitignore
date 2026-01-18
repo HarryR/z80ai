@@ -6,3 +6,4 @@ cpm
 *.COM
 *.com
 packages/
+dist/

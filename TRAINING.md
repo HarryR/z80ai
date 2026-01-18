@@ -221,7 +221,7 @@ Trigram hashing with 128 buckets means long similar phrases collide. For example
 ## Example Training Run
 
 ```
-$ cat data/tinychat*.txt | python3 train_autoregressive.py --epochs 300 --chat
+$ cat data/tinychat*.txt | python3 feedme.py --epochs 300 --chat
 
 ============================================================
 Autoregressive Character Model Training

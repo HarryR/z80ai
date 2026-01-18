@@ -15,9 +15,8 @@ This generates Z80 machine code for character-by-character text generation:
 """
 
 import numpy as np
-import torch
 from libz80 import Z80Builder
-from feedme import AutoregressiveModel
+from loadmodel import load_model_params
 
 # Z80 Constants
 BDOS = 0x0005
@@ -48,27 +47,13 @@ def pack_2bit_weights(weights: np.ndarray) -> bytes:
 def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     """Build the autoregressive inference .COM"""
 
-    # Load model
+    # Load model (supports both .pt and .npz formats)
     print(f"Loading model from {model_path}...")
-    checkpoint = torch.load(model_path, weights_only=True)
-    arch = checkpoint['architecture']
+    params, arch, charset = load_model_params(model_path)
 
-    # Load charset from checkpoint
-    charset = checkpoint['charset']
     eos_idx = len(charset) - 1
     num_chars = len(charset)
     print(f"Charset ({num_chars} chars): {repr(charset[:-1])} + EOS")
-
-    model = AutoregressiveModel(
-        input_size=arch['input_size'],
-        hidden_sizes=arch['hidden_sizes'],
-        num_chars=num_chars
-    )
-    model.load_state_dict(checkpoint['model_state'])
-    model.eval()
-
-    # Get quantized parameters
-    params = model.get_quantized_params()
 
     # Discover layers
     layer_names = sorted(set(k.replace('_weight', '').replace('_bias', '')

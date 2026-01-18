@@ -31,20 +31,30 @@ MAYBE
 
 A 20 Questions game where the model knows a secret topic and answers YES/NO/MAYBE to your questions. Guess correctly to WIN.
 
-```
-> is it alive
-YES
-> is it big
-YES
-> does it have a trunk
-YES
-> is it grey
-MAYBE
-> elephant
-WIN
-```
+![GUESS.COM example](examples/guess/example.png)
 
 Includes tools for generating training data with LLMs (Ollama or Claude API) and balancing class distributions.
+
+## Quickstart
+
+Get running in under 5 minutes:
+
+**1. Download** pre-built binaries from [GitHub Releases](../../releases)
+
+**2. Install an emulator:**
+
+| Platform | CP/M (.COM files) | ZX Spectrum (.TAP files) |
+|----------|-------------------|--------------------------|
+| **Linux** | [iz-cpm](https://github.com/ivanizag/iz-cpm/releases) | `apt install fuse-emulator-gtk` |
+| **Windows** | [iz-cpm](https://github.com/ivanizag/iz-cpm/releases) | [Fuse](https://fuse-emulator.sourceforge.net/) |
+| **macOS** | [iz-cpm](https://github.com/ivanizag/iz-cpm/releases) | `brew install fuse-emulator` |
+
+**3. Run:**
+
+- **CP/M**: `iz-cpm CHAT.COM`
+- **ZX Spectrum**: `fuse --tape CHAT.TAP`, then `LOAD "" CODE` and `RANDOMIZE USR 32768`
+
+For building from source or training your own models, see [TRAINING.md](TRAINING.md).
 
 ## Features
 

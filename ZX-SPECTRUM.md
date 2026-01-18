@@ -27,9 +27,9 @@ The ZX Spectrum 48K port adapts the CP/M version to use ZX Spectrum ROM routines
 
 ### Prerequisites
 - Python 3.6+
-- PyTorch
 - NumPy
-- Trained model file (`.pt`)
+- PyTorch (only needed for `.pt` files; not required for `.npz`)
+- Trained model file (`.pt` or `.npz`)
 
 ### Build Script
 
