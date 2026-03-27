@@ -49,6 +49,9 @@ Generates Q&A pairs using an LLM.
 # Claude API (faster, better quality)
 ./gendata.py --topic elephant --claude -n 500
 
+# MiniMax API (set MINIMAX_API_KEY env var)
+./gendata.py --topic elephant --minimax -n 500
+
 # With paraphrases (5 variations per question)
 ./gendata.py --topic elephant --claude -p 5 -n 500
 ```
@@ -59,6 +62,7 @@ Options:
 - `-d, --distractors` - Add wrong-topic questions (answered NO)
 - `--nonsense` - Add off-topic phrases (answered IDK)
 - `--claude` - Use Claude API instead of Ollama
+- `--minimax` - Use MiniMax API instead of Ollama
 - `--yes-only` - Only generate YES-answer questions
 - `--win-only` - Generate winning guesses
 - `-p, --paraphrase` - Generate N paraphrases per question
