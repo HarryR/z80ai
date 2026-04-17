@@ -83,6 +83,10 @@ class Z80Builder:
         self.emit(0xCD)
         self.fixup_word(label)
 
+    def call_nz(self, label: str):
+        self.emit(0xC4)
+        self.fixup_word(label)
+
     def call_addr(self, addr: int):
         self.emit(0xCD, addr & 0xFF, (addr >> 8) & 0xFF)
 
