@@ -58,7 +58,7 @@ CPM_CMDLINE = 0x0080
 MAX_OUTPUT_LEN = 50  # Maximum characters to generate
 
 
-def pack_weights_and_biases(weights: np.ndarray, biases: np.ndarray) -> bytes:
+def pack_weights_and_biases(weights: np.ndarray, biases: np.ndarray, chars: str) -> bytes:
     """Convert weights into index lists by weight and append bias after"""
     """each node."""
     wt_bias = []
@@ -75,6 +75,11 @@ def pack_weights_and_biases(weights: np.ndarray, biases: np.ndarray) -> bytes:
         bias_val = int(biases[n]) & 0xFFFF
         wt_bias.append(bias_val & 0xFF)
         wt_bias.append((bias_val >> 8) & 0xFF)
+        if chars != '':
+            if chars[n] == '\x00':
+                wt_bias.append(0)  # EOS
+            else:
+                wt_bias.append(ord(chars[n]))
 
     return bytes(wt_bias)
 
@@ -122,8 +127,13 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
 
     # Pack weights and biases
     weights_biases = []
+    layer_num = 0
     for name in layer_names:
-        weights_biases.append(pack_weights_and_biases(params[f'{name}_weight'], params[f'{name}_bias']))
+        chars = ''
+        if layer_num == num_layers - 1:
+            chars = charset
+        weights_biases.append(pack_weights_and_biases(params[f'{name}_weight'], params[f'{name}_bias'], chars))
+        layer_num += 1
 
     b = Z80Builder()
 
@@ -224,16 +234,16 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.ld_hl_label('NETWORK')
     b.call('INFER')
 
-    # Find best character
-    b.call('ARGMAX')
-
     # Check for EOS
-    b.ld_a_mem_label('RESULT')
-    b.cp_n(eos_idx)
+    b.or_a()
     b.ret_z()  # Return if EOS
 
+    b.ld_mem_label_a('RESULT')
+
     # Print character
-    b.call('PRINTCH')
+    b.ld_e_a()
+    b.ld_c_n(2)  # BDOS console output
+    b.call_addr(BDOS)
 
     # Update context with new character
     b.call('UPDATE_CTX')
@@ -243,20 +253,6 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.dec_a()
     b.ld_mem_label_a('GENCNT')
     b.jr_nz('GENLOOP')
-    b.ret()
-
-    # === PRINTCH: Print character from RESULT ===
-    b.label('PRINTCH')
-    b.ld_a_mem_label('RESULT')
-    # Look up in character table
-    b.ld_hl_label('CHARTBL')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ld_a_hl()
-    b.ld_e_a()
-    b.ld_c_n(2)  # BDOS console output
-    b.call_addr(BDOS)
     b.ret()
 
     # === UPDATE_CTX: Update context encoding with new character ===
@@ -272,11 +268,6 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
 
     # Store new character at end
     b.ld_a_mem_label('RESULT')
-    b.ld_hl_label('CHARTBL')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ld_a_hl()
     # Convert to lowercase for hashing
     b.cp_n(ord('A'))
     b.jr_c('UPD_STORE')
@@ -445,52 +436,77 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.jp('ENCODE_CTX')  # This will return for us
 
     # === Inference Evaluation ===
-    # HL points to NETWORK:
-    #    1 byte   number of layers
-    # Followed by the layers which are:
+    # BUF_A contains input values
+    # HL points to NETWORK which is a series of layers:
+    #    1 byte   1 if this is the last layer, 0 otherwise
     #    1 byte   number of output values
-    #    weight + bias data
+    #    For each output
+    #        1 byte   number of indices (N) of weight -2
+    #        N bytes  indices that multiply add by -2
+    #        1 byte   number of indices (N) of weight -1
+    #        N bytes  indices that multiply add by -1
+    #        1 byte   number of indices (N) of weight 1
+    #        N bytes  indices that multiply add by 1
+    #        2 bytes  bias to add to output
+    #        If this is the last layer there is also
+    #        1 byte   character to return if this output is largest
     #
-    # From this we load:
-    #    E   number of layers
+    # SP is loaded with NETWORK; POP is used to read data
+    #
+    # Registers for each layer:
     #    D   number of outputs of layer
-    #    HL  output buffer (only needs high byte)
     #    HL' input buffer
+    #    HL  output buffer (only needs high byte) if not last layer
+    #    HL  largest output value (if last layer)
+    #    B   character to output (if last layer)
+    #
+    # In the multiply-add loop, C'A is the accumulator.
+    # B' counts indicies
+    # D' and E' are temporaries
+    #
     # On return:
-    #    B   number of outputs of last layer
-    #    HL' last output buffer
+    #    A   character chosen by network
 
-    b.label('INFER');
+    b.label('INFER')
 
-    b.ld_e_hl() # number of layers
-    b.inc_hl()
+    b.ld_a_n(0xF2) # "JP P" opcode
+    b.ld_mem_label_a('RELU_SKIP') # mostly we allow ReLU
+    b.ld_de_label('RELU_GT0')
+    b.ld_mem_label_de('RELU_SKIP+1')
 
     b.ld_mem_label_sp('SPSAV')
     b.di()
-
     b.ld_sp_hl() # rest of the network data
 
-    b.ld_hl_label('BUF_B') # output buffer
+    b.ld_hl_label('BUF_B') # output buffer; TODO - ld h,high(BUF_B)
     b.exx()
-    b.ld_hl_label('BUF_A') # input buffer
+    b.ld_hl_label('BUF_A') # input buffer;  TODO - ld h,high(BUF_A)
+
+    b.label('NEXT_LAYER')
+
+    # Swap input and output buffers and go to start of output buffer.
+    # Not necessary on the first pass but saves a few bytes looping back.
     b.exx()
+    b.ld_l_n(0)
 
-    b.label('LAYER_LOOP')
+    b.pop_af()
+    b.ld_d_a() # D = number of outputs
+    b.jr_nc('DO_LAYER')
 
-    b.dec_sp()
-    b.pop_af() # A = number of outputs
-    b.ld_d_a() # now in D
-    b.ld_b_a() # will be last ouput size for ARGMAX
+    b.ld_a_n(0xC3) # JP opcode
+    b.ld_mem_label_a('RELU_SKIP') # no ReLU on last layer
+    b.ld_hl_label('ARGMAX0')
+    b.ld_mem_label_hl('RELU_SKIP+1')
 
-    # SP=weights + biases, HL'=IN, HL=OUT, D=LEN(OUT), E=# of layers
+    b.label('DO_LAYER')
 
-    b.dec_e() # decrement so easier to test for E=1 in ReLU check
+    # SP=weights + biases, HL'=IN, HL=OUT, D=LEN(OUT)
 
     b.label('LNEUR')
 
     b.exx()
     b.xor_a()
-    b.ld_c_a() # accumulator = 0
+    b.ld_c_a() # accumulator CA = 0
     for w in [-2, -1, 1]:
         b.pop_de() # E = number of weight indices, D = first weight
         b.srl_e()
@@ -541,35 +557,38 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.add_a_e()
     b.ld_e_a()
     b.ld_a_c()
-    b.adc_a_d()
-    b.ld_c_a()
-    b.ld_a_e()
+    b.adc_a_d() # note AE is accumulator now
+    # Self-modify skips ReLU and goes to ARGMAX0 and ARGMAX unconditionally
+    b.label('RELU_SKIP')
+    b.jp_p('RELU_GT0')
 
-    # Scale output to keep within range.
-    b.sra_c()
-    b.rra()
-    b.sra_c()
-    b.rra()
-
-    # Check if ReLU desired
-    b.exx()
-    b.inc_e()
-    b.dec_e()
-    b.exx()
-    b.jr_z('NO_RELU')
-    b.bit_7_c()
-    b.jr_z('NO_RELU')
+    # Result < 0; ReLU dictates we zero the output
     b.xor_a()
-    b.ld_c_a()
-    b.label('NO_RELU')
-
-    # write summation to output
     b.exx()
     b.ld_hl_a()
     b.inc_h()
+    b.ld_hl_a()
+    b.dec_h()
+    b.inc_l()
+
+    b.dec_d()
+    b.jp_nz('LNEUR')
+    b.jp('NEXT_LAYER')
+
+    b.label('RELU_GT0')
+    # Scale output to keep within range.
+    b.sra_a()
+    b.rr_e()
+    b.sra_a()
+    b.rr_e()
+
+    # write summation to output
+    b.ex_af_af()
+    b.ld_a_e()
     b.exx()
-    b.ld_a_c()
-    b.exx()
+    b.ld_hl_a()
+    b.inc_h()
+    b.ex_af_af()
     b.ld_hl_a()
     b.dec_h()
     b.inc_l()
@@ -578,90 +597,78 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.dec_d()
     b.jp_nz('LNEUR')
 
-    # Swap input and output buffers.  Could be done with an XOR to each H.
-    # Also need to zero L
-    # Or, considering only B and and E are live, just EXX and pull them over.
-    # And B is just being cute, really.
-    b.ld_l_n(0)
-    b.ld_a_h() # A=H
+    b.jp('NEXT_LAYER')
+
+    b.label('ARGMAX0')
+
+    # First result character is accepted unless we find better
+    b.add_a_n(128) # convert result to unsigned
+    b.ex_af_af()
+    b.ld_a_e()
     b.exx()
+
+    # Next time we'll compare to find the biggest result
+    b.ld_hl_label('ARGMAX')
+    b.ld_mem_label_hl('RELU_SKIP+1')
+
+    b.ld_l_a()
     b.ex_af_af()
-    b.ld_l_n(0)
-    b.ld_a_h() # A'=H'
-    b.ex_af_af()
-    b.ld_h_a() # H'=A (=H)
-    b.exx()
-    b.ex_af_af()
-    b.ld_h_a() # H=A' (=H')
+    b.ld_h_a()
 
-    b.inc_e() # was -1 as ReLU flag
-    b.dec_e()
-    b.jp_nz('LAYER_LOOP')
+    b.dec_sp()
+    b.pop_bc() # B is the best character we have
 
-    b.ld_sp_mem_label('SPSAV')
-    b.ei()
+    b.dec_d()
+    b.jp_nz('LNEUR')
+    b.jr('DONE_LAYERS')
 
-    b.ret()
-
-    # === ARGMAX ===
-    # HL' = layer values, B = layer size.  Exactly what INFER returns with.
-    # Hastily fixed up for split values; code could be much improved.
-    # Especially if we work backwards so L is our counter (though beware how
-    # that could change things -- we should accept "=" to have same operation)
     b.label('ARGMAX')
 
-    b.ld_a_b()
+    b.add_a_n(128) # convert result to unsigned
     b.exx()
-    b.ld_b_a()
+    b.cp_h()
+    b.jr_c('NOT_MAX')
+    b.jr_nz('NEW_MAX')
+    b.exx()
+    b.ld_a_e()
+    b.exx()
+    b.cp_l()
+    b.jr_z('NOT_MAX')
+    b.jr_c('NOT_MAX')
 
-    b.ld_e_hl()
-    b.inc_h()
-    b.ld_d_hl()
-    b.dec_h()
-    b.inc_l()
+    b.label('FINISH_MAX')
+    b.ld_l_a() # record new maximum
+    b.dec_sp()
+    b.pop_bc() # B is character to output
+    b.dec_d()
+    b.jp_nz('LNEUR')
+    b.jr('DONE_LAYERS')
 
-    b.ld_mem_label_de('MAXV')
-    b.xor_a()
-    b.ld_mem_label_a('MAXI')
-    b.ld_c_n(1)
+    b.label('NEW_MAX')
+    b.ld_h_a()
+    b.exx()
+    b.ld_a_e()
+    b.exx()
+    b.jr('FINISH_MAX')
 
-    b.label('AMLP')
-    b.ld_e_hl()
-    b.inc_h()
-    b.ld_d_hl()
-    b.dec_h()
-    b.inc_l()
+    b.label('NOT_MAX')
+    b.inc_sp() # skip character
+    b.dec_d()
+    b.jp_nz('LNEUR')
 
-    b.push_hl()
-    b.ld_hl_mem_label('MAXV')
-    b.push_de()
-    b.or_a()
-    b.ex_de_hl()
-    b.sbc_hl_de()
-    b.pop_de()
-    b.jp_m('AMSK')
-    b.jr_z('AMSK')
-    b.ld_mem_label_de('MAXV')
-    b.ld_a_c()
-    b.ld_mem_label_a('MAXI')
-
-    b.label('AMSK')
-    b.pop_hl()
-    b.inc_c()
-    b.djnz('AMLP')
-    b.ld_a_mem_label('MAXI')
-    b.ld_mem_label_a('RESULT')
+    b.label('DONE_LAYERS')
+    b.ld_a_b()
+    b.ld_sp_mem_label('SPSAV')
+    b.ei()
     b.ret()
 
     # === TOKENIZE (query into first 128 buckets) ===
     b.label('TOKENIZE')
     # Clear first 128 buckets of INBUF
     b.ld_hl_label('INBUF')
-    b.ld_de_label('INBUF')
-    b.inc_de()
+    b.ld_de_label('INBUF+1')
     b.ld_bc_nn(255)  # 128 * 2 - 1
-    b.ld_a_n(0)
-    b.ld_hl_a()
+    b.ld_hl_n(0)
     b.ldir()
 
     # Get length
@@ -796,21 +803,11 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.ret()
 
     # === DATA ===
-    # Character table (dynamic size based on charset)
-    b.label('CHARTBL')
-    for c in charset:
-        if c == '\x00':
-            b.db(0)  # EOS
-        else:
-            b.db(ord(c))
-
     b.label('CRLF')
     b.db(13, 10, ord('$'))
 
     # Variables
     b.label('SPSAV'); b.dw(0)
-    b.label('MAXV'); b.dw(0)
-    b.label('MAXI'); b.db(0)
     b.label('RESULT'); b.db(0)
     b.label('GENCNT'); b.db(0)
     b.label('TOKLEN'); b.db(0)
@@ -827,9 +824,12 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.label('CHATDAT'); b.ds(62)  # Input text buffer
 
     b.label('NETWORK')
-    b.db(num_layers)
     # Weights and biases
     for i in range(num_layers):
+        if i < num_layers - 1:
+            b.db(0)
+        else:
+            b.db(1)
         b.db(layer_sizes[i + 1])
         b.db(*weights_biases[i])
 
@@ -856,13 +856,13 @@ if __name__ == '__main__':
                         help='Output .COM file')
     args = parser.parse_args()
 
-    print("Building autoregressive CHAT.COM...\n")
+    print(f"Building autoregressive {args.output}...\n")
 
     b = build_autoreg(args.model)
 
     # Show key addresses
     print("\nKey addresses:")
-    for name in ['START', 'GENERATE', 'LAYER', 'ARGMAX', 'TOKENIZE', 'UPDATE_CTX', 'CHARTBL']:
+    for name in ['START', 'GENERATE', 'LAYER', 'TOKENIZE', 'UPDATE_CTX', 'INBUF']:
         if name in b.labels:
             print(f"  {name}: {b.labels[name]:04X}h")
 
