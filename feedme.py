@@ -342,7 +342,18 @@ def validate_charset(pairs: List[Tuple[str, str]], charset: str) -> None:
                                f"Charset was built from first chunk and cannot change.")
 
 
-def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float = 0.01, save_best: bool = False):
+def parse_hidden_sizes(spec: str) -> list[int]:
+    vals = [int(x.strip()) for x in spec.split(',') if x.strip()]
+    if not vals:
+        raise ValueError("hidden size list cannot be empty")
+    if any(v <= 0 or v > 255 for v in vals):
+        raise ValueError("hidden sizes must be in range 1..255")
+    return vals
+
+
+def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float = 0.01,
+                  save_best: bool = False, hidden_sizes: list[int] | None = None,
+                  checkpoint_file: str = 'command_model_autoreg.pt'):
     """Train incrementally on chunks of data from stdin."""
     global CHARSET, CHAR_TO_IDX, IDX_TO_CHAR, EOS_IDX, NUM_CHARS
     import sys
@@ -378,8 +389,8 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
 
     query_encoder = TrigramEncoder(num_buckets=128)
     context_encoder = ContextEncoder(num_buckets=128, context_len=8)
-    hidden_sizes = [256, 192, 128]
-    checkpoint_file = 'command_model_autoreg.pt'
+    if hidden_sizes is None:
+        hidden_sizes = [256, 192, 128]
 
     model = None
     total_epochs = 0
@@ -391,7 +402,7 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
     try:
         checkpoint = torch.load(checkpoint_file, weights_only=False)
         arch = checkpoint.get('architecture', {})
-        if arch.get('num_classes') == NUM_CHARS:
+        if arch.get('num_classes') == NUM_CHARS and arch.get('hidden_sizes') == hidden_sizes:
             model = AutoregressiveModel(input_size=256, hidden_sizes=hidden_sizes, num_chars=NUM_CHARS)
             model.load_state_dict(checkpoint['model_state'])
             total_epochs = checkpoint.get('total_epochs', 0)
@@ -399,7 +410,7 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
             best_epoch = checkpoint.get('best_epoch', 0)
             print(f"Resumed from checkpoint: {total_epochs} epochs, best IntAcc: {best_int_acc:.1%}")
         else:
-            print(f"Output size changed ({arch.get('num_classes')} → {NUM_CHARS}), starting fresh")
+            print("Architecture changed, starting fresh")
     except FileNotFoundError:
         print("No checkpoint found, starting fresh")
     except Exception as e:
@@ -521,6 +532,10 @@ if __name__ == '__main__':
     parser.add_argument('--file', '-f', type=str, default=None, help='Training data file (default: stdin)')
     parser.add_argument('--chunk', '-c', type=int, default=0, help='Chunk size for streaming (0 = load all as one chunk)')
     parser.add_argument('--save-best', action='store_true', help='Save best model instead of latest')
+    parser.add_argument('--hidden-sizes', type=str, default='256,192,128',
+                        help='Comma-separated hidden layer sizes (e.g. 128,96,64)')
+    parser.add_argument('--output', '-o', type=str, default='command_model_autoreg.pt',
+                        help='Checkpoint output path')
     parser.add_argument('--chat', action='store_true', help='Interactive chat after training')
     args = parser.parse_args()
 
@@ -530,7 +545,14 @@ if __name__ == '__main__':
         with open(args.file) as f:
             sys.stdin = io.StringIO(f.read())
 
-    model = train_chunked(chunk_size=args.chunk, epochs_per_chunk=args.epochs, save_best=args.save_best)
+    hidden_sizes = parse_hidden_sizes(args.hidden_sizes)
+    model = train_chunked(
+        chunk_size=args.chunk,
+        epochs_per_chunk=args.epochs,
+        save_best=args.save_best,
+        hidden_sizes=hidden_sizes,
+        checkpoint_file=args.output,
+    )
 
     # Interactive chat session
     if args.chat:
