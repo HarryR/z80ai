@@ -47,9 +47,13 @@ class Z80Builder:
     def resolve(self):
         """Apply all fixups"""
         for offset, label, ftype in self.fixups:
+            bump = 0
+            if label.endswith("+1"):
+                bump = 1
+                label = label[:-2]
             if label not in self.labels:
                 raise ValueError(f"Unknown label: {label}")
-            target = self.labels[label]
+            target = self.labels[label] + bump
 
             if ftype == 'abs':
                 self.code[offset] = target & 0xFF
@@ -104,6 +108,10 @@ class Z80Builder:
 
     def jp_m(self, label: str):
         self.emit(0xFA)
+        self.fixup_word(label)
+
+    def jp_p(self, label: str):
+        self.emit(0xF2)
         self.fixup_word(label)
 
     def jr(self, label: str):
@@ -243,6 +251,7 @@ class Z80Builder:
     def dec_bc(self): self.emit(0x0B)
     def inc_hl(self): self.emit(0x23)
     def dec_hl(self): self.emit(0x2B)
+    def inc_sp(self): self.emit(0x33)
     def dec_sp(self): self.emit(0x3B)
     def inc_c(self): self.emit(0x0C)
     def dec_c(self): self.emit(0x0D)
@@ -260,8 +269,10 @@ class Z80Builder:
     def rrca(self): self.emit(0x0F)
     def rra(self): self.emit(0x1F)
     def rlca(self): self.emit(0x07)
+    def sra_a(self): self.emit(0xCB, 0x2F)
     def sra_c(self): self.emit(0xCB, 0x29)
     def sra_h(self): self.emit(0xCB, 0x2C)
+    def rr_e(self): self.emit(0xCB, 0x1B)
     def rr_l(self): self.emit(0xCB, 0x1D)
     def sla_l(self): self.emit(0xCB, 0x25)
     def rl_c(self): self.emit(0xCB, 0x11)
@@ -294,6 +305,8 @@ class Z80Builder:
     def cp_hl(self): self.emit(0xBE)  # CP (HL)
     def cp_a(self): self.emit(0xBF)
     def cp_b(self): self.emit(0xB8)  # CP B
+    def cp_h(self): self.emit(0xBC)  # CP H
+    def cp_l(self): self.emit(0xBD)  # CP L
     def inc_a(self): self.emit(0x3C)
     def dec_a(self): self.emit(0x3D)
     def inc_de(self): self.emit(0x13)
