@@ -14,6 +14,10 @@ Usage:
     ./gendata.py --topic elephant --claude -n 500 > training.txt
     ./gendata.py --topic elephant --claude --model claude-opus-4-20250514
 
+    # MiniMax API (set MINIMAX_API_KEY env var)
+    ./gendata.py --topic elephant --minimax -n 500 > training.txt
+    ./gendata.py --topic elephant --minimax --model MiniMax-M2.7-highspeed
+
     # With distractors and nonsense
     ./gendata.py --topic elephant -d 20 --nonsense --claude
 
@@ -23,7 +27,9 @@ Usage:
 
 import argparse
 import json
+import os
 import random
+import re
 import sys
 import urllib.request
 
@@ -36,6 +42,7 @@ except ImportError:
 
 DEFAULT_MODEL = 'gemma2:9b'
 DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-20250514'
+DEFAULT_MINIMAX_MODEL = 'MiniMax-M2.7'
 
 # Token tracking for cost estimation
 total_input_tokens = 0
@@ -304,6 +311,74 @@ def claude_json(model: str, prompt: str, max_tokens: int = 200) -> dict | None:
     return None
 
 
+def minimax_json(model: str, prompt: str, max_tokens: int = 200, temperature: float = 1.0) -> dict | None:
+    """Call MiniMax API (OpenAI-compatible) and return parsed JSON response."""
+    global total_input_tokens, total_output_tokens
+
+    api_key = os.environ.get("MINIMAX_API_KEY")
+    if not api_key:
+        print("# Error: MINIMAX_API_KEY environment variable not set", file=sys.stderr)
+        return None
+
+    base_url = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
+
+    # MiniMax temperature must be in (0.0, 1.0], clamp if needed
+    if temperature <= 0:
+        temperature = 0.01
+    elif temperature > 1.0:
+        temperature = 1.0
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt + "\nRespond with JSON only, no other text."}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    try:
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/chat/completions",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+        )
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+
+            # Track tokens
+            usage = result.get("usage", {})
+            total_input_tokens += usage.get("prompt_tokens", 0)
+            total_output_tokens += usage.get("completion_tokens", 0)
+
+            # Get response text
+            response_text = ""
+            choices = result.get("choices", [])
+            if choices:
+                response_text = choices[0].get("message", {}).get("content", "").strip()
+
+            # Strip <think>...</think> tags (MiniMax chain-of-thought)
+            response_text = re.sub(r'<think>[\s\S]*?</think>', '', response_text).strip()
+
+            # Strip markdown code blocks if present
+            if response_text.startswith("```"):
+                lines = response_text.split("\n")
+                lines = [l for l in lines if not l.startswith("```")]
+                response_text = "\n".join(lines).strip()
+
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError as e:
+                print(f"# JSON parse error: {e}", file=sys.stderr)
+                print(f"# Raw response: {response_text[:200]}", file=sys.stderr)
+    except Exception as e:
+        print(f"# MiniMax error: {e}", file=sys.stderr)
+
+    return None
+
+
 # Active backend function (set in main)
 api_json = ollama_json
 
@@ -529,8 +604,9 @@ def main():
     parser = argparse.ArgumentParser(description='Generate 20 questions training data')
     parser.add_argument('--topic', '-t', required=True, help='The secret topic/thing')
     parser.add_argument('-n', '--count', type=int, default=100, help='Number of Q&A pairs to generate')
-    parser.add_argument('--model', '-m', default=None, help='Model to use (default: gemma2:9b for ollama, claude-sonnet-4 for claude)')
+    parser.add_argument('--model', '-m', default=None, help='Model to use (default: gemma2:9b for ollama, claude-sonnet-4 for claude, MiniMax-M2.7 for minimax)')
     parser.add_argument('--claude', action='store_true', help='Use Claude API instead of Ollama')
+    parser.add_argument('--minimax', action='store_true', help='Use MiniMax API instead of Ollama (set MINIMAX_API_KEY env var)')
     parser.add_argument('--batch', '-b', type=int, default=10, help='Questions per LLM call')
     parser.add_argument('--distractors', '-d', type=int, default=10, help='Number of wrong guesses to auto-generate (0 to disable)')
     parser.add_argument('--nonsense', action='store_true', help='Add nonsense/gibberish -> IDK training')
@@ -547,13 +623,21 @@ def main():
         api_json = lambda model, prompt, max_tokens=200: claude_json(model, prompt, max_tokens)
         if args.model is None:
             args.model = DEFAULT_CLAUDE_MODEL
+    elif args.minimax:
+        if not os.environ.get("MINIMAX_API_KEY"):
+            print("# Error: MINIMAX_API_KEY environment variable not set", file=sys.stderr)
+            sys.exit(1)
+        # MiniMax uses chain-of-thought internally, so scale up max_tokens
+        api_json = lambda model, prompt, max_tokens=200: minimax_json(model, prompt, max(max_tokens * 4, 2048))
+        if args.model is None:
+            args.model = DEFAULT_MINIMAX_MODEL
     else:
         api_json = lambda model, prompt, max_tokens=200, temp=0.75: ollama_json(model, prompt, max_tokens, temp)
         if args.model is None:
             args.model = DEFAULT_MODEL
 
     topic = args.topic.lower()
-    backend = "claude" if args.claude else "ollama"
+    backend = "claude" if args.claude else ("minimax" if args.minimax else "ollama")
     print(f"# Topic: {topic}", file=sys.stderr)
     print(f"# Backend: {backend} | Model: {args.model}", file=sys.stderr)
     print(f"# Generating {args.count} Q&A pairs...", file=sys.stderr)

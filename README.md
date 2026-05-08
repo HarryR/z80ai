@@ -33,7 +33,7 @@ A 20 Questions game where the model knows a secret topic and answers YES/NO/MAYB
 
 ![GUESS.COM example](examples/guess/example.png)
 
-Includes tools for generating training data with LLMs (Ollama or Claude API) and balancing class distributions.
+Includes tools for generating training data with LLMs (Ollama, Claude API, or MiniMax API) and balancing class distributions.
 
 ## Quickstart
 
