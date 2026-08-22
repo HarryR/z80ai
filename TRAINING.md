@@ -167,6 +167,12 @@ Trade-offs:
 - **Deeper layers** → Better feature extraction, but diminishing returns
 - **Fewer layers** → Faster inference, less expressive
 
+**Layer width limits:** the Z80 backends count neurons in the `B` register, so
+`DJNZ` caps a layer at 256. Anything wider builds only for eZ80
+(`buildez80.py`), which terminates each neuron with a sentinel instead of
+counting — see [EZ80.md](EZ80.md). `feedme.py` prints a note when you cross that
+line, and the Z80 builders raise rather than silently mis-assemble the model.
+
 To change bucket counts, modify the encoder instantiations:
 ```python
 query_encoder = TrigramEncoder(num_buckets=128)      # Query encoding

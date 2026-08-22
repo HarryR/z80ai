@@ -18,7 +18,8 @@ asked for.
 
 Usage:
     python build.py --model examples/guess/model.npz --output GUESS.COM
-    python build.py --model model.npz --target zx --output CHAT.TAP
+    python build.py --model model.npz --target zx  --output CHAT.TAP
+    python build.py --model model.npz --target ez80 --output CHAT.bin
 """
 
 from __future__ import annotations
@@ -60,6 +61,12 @@ def build_zx(model: str, max_output_len: int):
     return buildz80tap.build_autoreg(model, max_output_len=max_output_len), "packed"
 
 
+def build_ez80(model: str, max_output_len: int):
+    import buildez80
+
+    return buildez80.build_autoreg(model, max_output_len=max_output_len), "bytes"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -67,7 +74,7 @@ def main() -> None:
                         help="Model file to load (.npz or .pt)")
     parser.add_argument("--output", "-o", required=True, help="Output file")
     parser.add_argument("--target", "-t", default="auto",
-                        choices=["auto", "cpm", "cpm-fast", "cpm-packed", "zx"],
+                        choices=["auto", "cpm", "cpm-fast", "cpm-packed", "zx", "ez80"],
                         help="Platform and weight layout (default: auto = cpm)")
     parser.add_argument("--max-output-len", type=int, default=50,
                         help="Maximum characters generated per response")
@@ -80,8 +87,10 @@ def main() -> None:
         builder, layout = build_cpm(args.model, args.max_output_len, "fast")
     elif target == "cpm-packed":
         builder, layout = build_cpm(args.model, args.max_output_len, "packed")
-    else:
+    elif target == "zx":
         builder, layout = build_zx(args.model, args.max_output_len)
+    else:
+        builder, layout = build_ez80(args.model, args.max_output_len)
 
     if target == "zx":
         import buildz80tap

@@ -5,13 +5,17 @@ Measure inference cost for each build target by running it in the emulator.
 Two numbers are reported per target:
 
   instructions  instructions retired for one forward pass. Platform-neutral,
-                so it stays meaningful when comparing across architectures.
+                and the honest way to compare the eZ80 backend against the Z80
+                ones, since the two have completely different per-instruction
+                timings.
   T-states      Z80 bus cycles, and the wall-clock estimate that follows from
-                them, at each platform's stock clock.
+                them. Only meaningful for the Z80 targets - an eZ80 retires
+                most instructions in a fraction of the cycles a Z80 needs, so
+                its T-state column is omitted rather than quoted misleadingly.
 
 Usage:
     python bench.py --model examples/guess/model.npz
-    python bench.py --model examples/guess/model.npz --target com fast tap
+    python bench.py --model examples/guess/model.npz --target com fast ez80
 """
 
 from __future__ import annotations
@@ -19,19 +23,23 @@ from __future__ import annotations
 import argparse
 import importlib
 
-from libhost import CPMHost, ZXHost
+from libhost import AgonHost, CPMHost, ZXHost
 
-# module, description, clock Hz
+# module, description, clock Hz, is an eZ80 target
 TARGETS = {
-    "com": ("buildz80com", "CP/M, packed 2-bit weights", 4_000_000),
-    "fast": ("buildfastz80com", "CP/M, per-value index lists", 4_000_000),
-    "tap": ("buildz80tap", "ZX Spectrum, packed weights", 3_500_000),
+    "com": ("buildz80com", "CP/M, packed 2-bit weights", 4_000_000, False),
+    "fast": ("buildfastz80com", "CP/M, per-value index lists", 4_000_000, False),
+    "tap": ("buildz80tap", "ZX Spectrum, packed weights", 3_500_000, False),
+    "ez80": ("buildez80", "Agon eZ80, one byte per weight", 18_432_000, True),
 }
 
 
 def _host(target: str, query: str):
     if target == "tap":
         return ZXHost(stdin=[query, "!"]), 0x8000
+    if target == "ez80":
+        host = AgonHost(stdin=[query, "!"])
+        return host, host.LOAD_ADDR
     return CPMHost(cmdline=query), 0x0100
 
 
@@ -56,6 +64,7 @@ def measure(target: str, model_path: str, query: str = "HELLO") -> dict:
         "tstates": cpu.tstates - start_t,
         "instructions": cpu.instructions - start_i,
         "clock": TARGETS[target][2],
+        "is_ez80": TARGETS[target][3],
     }
 
 
@@ -65,7 +74,7 @@ def main() -> None:
     )
     parser.add_argument("--model", "-m", default="examples/guess/model.npz")
     parser.add_argument("--query", "-q", default="HELLO")
-    parser.add_argument("--target", "-t", nargs="+", default=["com", "fast"],
+    parser.add_argument("--target", "-t", nargs="+", default=["com", "fast", "ez80"],
                         choices=sorted(TARGETS))
     args = parser.parse_args()
 
@@ -77,13 +86,17 @@ def main() -> None:
     print("-" * 70)
     for row in rows:
         speedup = baseline / row["instructions"]
-        cycles = f"{row['tstates']:,}"
-        seconds = f"{row['tstates'] / row['clock']:.2f}"
+        if row["is_ez80"]:
+            cycles, seconds = "-", "-"
+        else:
+            cycles = f"{row['tstates']:,}"
+            seconds = f"{row['tstates'] / row['clock']:.2f}"
         print(
             f"{row['target']:8} {row['bytes']:9,} {row['instructions']:13,} "
             f"{speedup:7.2f}x {cycles:>14} {seconds:>12}"
         )
-    print("\nspeedup is relative to the first target listed, by instruction count.\n")
+    print("\nspeedup is relative to the first target listed, by instruction count.")
+    print("eZ80 T-states are omitted: its per-instruction timings differ from the Z80's.\n")
 
 
 if __name__ == "__main__":

@@ -160,7 +160,7 @@ def forward(model: Model, x: np.ndarray, accum_bits: int = 16) -> np.ndarray:
 
 
 #: Widest layer a Z80 backend can emit: its neuron loop counts in B, and DJNZ
-#: treats a zero start as 256.
+#: treats a zero start as 256. The eZ80 backend uses sentinels, so it has no cap.
 Z80_MAX_LAYER = 256
 
 
@@ -184,7 +184,8 @@ def validate_z80_layers(layer_sizes: list[int]) -> None:
     oversized = [n for n in layer_sizes if n > Z80_MAX_LAYER]
     if oversized:
         raise ValueError(
-            f"layer sizes {oversized} exceed the Z80 limit of {Z80_MAX_LAYER}"
+            f"layer sizes {oversized} exceed the Z80 limit of {Z80_MAX_LAYER}; "
+            f"build for eZ80 with buildez80.py, which has no such limit"
         )
 
 

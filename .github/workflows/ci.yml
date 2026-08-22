@@ -83,6 +83,18 @@ jobs:
             --model examples/tinychat/model.npz \
             --output dist/CHAT.TAP
 
+      - name: Build guess example (Agon eZ80)
+        run: |
+          python3 buildez80.py \
+            --model examples/guess/model.npz \
+            --output dist/GUESS.bin
+
+      - name: Build tinychat example (Agon eZ80)
+        run: |
+          python3 buildez80.py \
+            --model examples/tinychat/model.npz \
+            --output dist/CHAT.bin
+
       - name: List built artifacts
         run: ls -la dist/
 
@@ -115,7 +127,9 @@ jobs:
             dist/GUESS.COM
             dist/GUESS-FAST.COM
             dist/GUESS.TAP
+            dist/GUESS.bin
             dist/CHAT.COM
             dist/CHAT-FAST.COM
             dist/CHAT.TAP
+            dist/CHAT.bin
           generate_release_notes: true

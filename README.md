@@ -53,6 +53,7 @@ Get running in under 5 minutes:
 
 - **CP/M**: `iz-cpm CHAT.COM`
 - **ZX Spectrum**: `fuse --tape CHAT.TAP`, then `LOAD "" CODE` and `RANDOMIZE USR 32768`
+- **Agon Light / eZ80**: copy `CHAT.bin` to the SD card and run it by name
 
 For building from source or training your own models, see [TRAINING.md](TRAINING.md).
 
@@ -63,11 +64,13 @@ weight layout that still fits the machine:
 
 ```bash
 python build.py --model examples/guess/model.npz --output GUESS.COM
-python build.py --model examples/guess/model.npz --target zx --output GUESS.TAP
+python build.py --model examples/guess/model.npz --target zx   --output GUESS.TAP
+python build.py --model examples/guess/model.npz --target ez80 --output GUESS.bin
 ```
 
 The individual builders (`buildz80com.py`, `buildfastz80com.py`,
-`buildz80tap.py`) still work standalone if you want a specific layout.
+`buildz80tap.py`, `buildez80.py`) still work standalone if you want a specific
+layout.
 
 ## Features
 
@@ -92,6 +95,10 @@ Z80-μLM runs on multiple Z80-based platforms:
   - Uses ZX Spectrum ROM routines for I/O
   - Memory optimized for 48K systems
   - Compatible with most ZX Spectrum emulators
+- **Agon Light / eZ80 (ADL mode)**: `buildez80.py`. See [EZ80.md](EZ80.md)
+  - 24-bit addressing, so the 64KB ceiling on model size is gone
+  - 24-bit accumulators, which cannot overflow the way the Z80's 16-bit ones can
+  - No 256-neuron layer limit
 
 For ZX Spectrum builds, use `run-zx.sh` in example directories or see the [ZX Spectrum guide](ZX-SPECTRUM.md).
 
@@ -105,10 +112,15 @@ costs. For the shipped 256→256→192→128→11 `guess` model:
 | CP/M, packed weights | 38,920 | 3,004,037 | 26,843,795 | 6.71 @ 4 MHz |
 | CP/M, index lists | 43,520 | 319,515 | 1,992,905 | 0.50 @ 4 MHz |
 | ZX Spectrum | 38,981 | 4,245,425 | 41,169,261 | 11.76 @ 3.5 MHz |
+| Agon eZ80 | 146,581 | 923,194 | — | — |
 
 ```bash
-python bench.py --model examples/guess/model.npz --target com fast
+python bench.py --model examples/guess/model.npz --target com fast ez80
 ```
+
+eZ80 T-states are omitted rather than quoted misleadingly: its per-instruction
+timings differ substantially from the Z80's, so instruction count is the honest
+cross-architecture comparison.
 
 ## Interaction Style
 

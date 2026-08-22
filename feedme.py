@@ -314,12 +314,22 @@ def validate_charset(pairs: List[Tuple[str, str]], charset: str) -> None:
                                f"Charset was built from first chunk and cannot change.")
 
 
+#: Widest layer the Z80 backends can emit. Their neuron loops count in B, so a
+#: layer of 256 is the most DJNZ can express. The eZ80 backend uses sentinels
+#: instead of counters and has no such limit.
+Z80_MAX_LAYER = 256
+
+
 def parse_hidden_sizes(spec: str) -> list[int]:
     vals = [int(x.strip()) for x in spec.split(',') if x.strip()]
     if not vals:
         raise ValueError("hidden size list cannot be empty")
-    if any(v <= 0 or v > 255 for v in vals):
-        raise ValueError("hidden sizes must be in range 1..255")
+    if any(v <= 0 or v > 65535 for v in vals):
+        raise ValueError("hidden sizes must be in range 1..65535")
+    oversized = [v for v in vals if v > Z80_MAX_LAYER]
+    if oversized:
+        print(f"Note: layers {oversized} exceed {Z80_MAX_LAYER} neurons and will "
+              f"only build for eZ80 (buildez80.py), not for Z80 targets.")
     return vals
 
 
