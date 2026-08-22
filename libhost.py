@@ -148,15 +148,22 @@ ZX_CHAN_OPEN = 0x1601
 ZX_KEY_INPUT = 0x10A8
 
 
+ZX_DEFAULT_ORG = 0x6000
+
+
 class ZXHost:
     """Stubs for the handful of 48K ROM routines the TAP build calls."""
 
-    def __init__(self, stdin: list[str] | None = None, org: int = 0x8000) -> None:
+    def __init__(self, stdin: list[str] | None = None, org: int = ZX_DEFAULT_ORG) -> None:
         self.cpu = Z80()
         self.output: list[str] = []
         self.stdin = list(stdin or [])
         self.org = org
         self.finished = False
+        # BASIC's stack lives below the code once RAMTOP is moved down with
+        # CLEAR, so put ours there too rather than somewhere the image covers.
+        self._stack = org - 0x20
+        self._exit = org - 0x40
         for addr, fn in (
             (ZX_PRINT_A, self._print_a),
             (ZX_CLS, self._ret),
@@ -164,7 +171,7 @@ class ZXHost:
             (ZX_KEY_INPUT, self._key_input),
         ):
             self.cpu.hooks[addr] = fn
-        self.cpu.sp = 0x7F00
+        self.cpu.sp = self._stack
 
     @staticmethod
     def _ret(cpu: Z80) -> bool:
@@ -192,13 +199,17 @@ class ZXHost:
         return True
 
     def run(self, image: bytes, max_cycles: int = 2_000_000_000) -> str:
+        if self.org + len(image) > 0x10000:
+            raise Z80Error(
+                f"image of {len(image):,} bytes does not fit in RAM at {self.org:#06x}"
+            )
         self.cpu.load(self.org, image)
         self.cpu.pc = self.org
-        # A RET from the top level lands on a HALT we plant under the stack.
-        self.cpu.poke(0x7FFE, 0x76)
-        self.cpu.sp = 0x7F00
-        self.cpu.poke(0x7F00, 0xFE)
-        self.cpu.poke(0x7F01, 0x7F)
+        # RANDOMIZE USR returns to BASIC; here a RET lands on a HALT.
+        self.cpu.poke(self._exit, 0x76)
+        self.cpu.sp = self._stack
+        self.cpu.poke(self._stack, self._exit & 0xFF)
+        self.cpu.poke(self._stack + 1, (self._exit >> 8) & 0xFF)
         self.cpu.run(max_cycles=max_cycles)
         return "".join(self.output)
 
@@ -206,7 +217,7 @@ class ZXHost:
 def run_zx(
     image: bytes,
     stdin: list[str] | None = None,
-    org: int = 0x8000,
+    org: int = ZX_DEFAULT_ORG,
     max_cycles: int = 2_000_000_000,
 ) -> tuple[str, ZXHost]:
     host = ZXHost(stdin=stdin, org=org)

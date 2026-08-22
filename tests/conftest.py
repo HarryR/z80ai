@@ -75,6 +75,11 @@ def odd_model_path(tmp_path_factory, odd_model: Model) -> str:
 
 
 @pytest.fixture(scope="session")
+def examples_dir() -> str:
+    return EXAMPLES
+
+
+@pytest.fixture(scope="session")
 def guess_model_path() -> str:
     path = os.path.join(EXAMPLES, "guess", "model.npz")
     if not os.path.exists(path):

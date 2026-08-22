@@ -9,7 +9,7 @@ import libinfer
 import pytest
 
 CPM_TPA_TOP = 0xE400  # where a stock CP/M 2.2 BDOS starts
-ZX_RAMTOP = 0xFF58  # UDG area on a 48K machine
+ZX_RAM_TOP = 0x10000  # one past the last byte of RAM on a 48K machine
 
 
 def test_tap_header_block_layout():
@@ -69,7 +69,33 @@ def test_com_fits_in_the_transient_program_area(images, target):
 def test_tap_payload_fits_in_48k_ram(images):
     builder = images["tap"]
     end = builder.org + len(builder.build())
-    assert end < ZX_RAMTOP
+    assert end <= ZX_RAM_TOP
+
+
+@pytest.mark.parametrize("example", ["guess", "tinychat"])
+def test_shipped_examples_fit_in_48k_ram(example, examples_dir):
+    """The real models, not a synthetic one.
+
+    Both shipped .TAP files used to be assembled at 8000h, where only 32,768
+    bytes are available - they ran past FFFFh and could not load at all. A
+    synthetic tiny model fits anywhere, so only the real ones catch this.
+    """
+    import os
+
+    path = os.path.join(examples_dir, example, "model.npz")
+    if not os.path.exists(path):
+        pytest.skip(f"{example} example model not present")
+    builder = buildz80tap.build_autoreg(path)
+    end = builder.org + len(builder.build())
+    assert end <= ZX_RAM_TOP, (
+        f"{example} runs to {end:#07x}, past the top of RAM by {end - ZX_RAM_TOP:,}"
+    )
+
+
+def test_builder_refuses_an_image_that_would_not_load(guess_model_path):
+    """Assembling above the fold must fail loudly, not emit a broken tape."""
+    with pytest.raises(ValueError, match="past the top of RAM"):
+        buildz80tap.build_autoreg(guess_model_path, org=0x8000)
 
 
 @pytest.mark.parametrize("target", ["com", "fast", "tap"])

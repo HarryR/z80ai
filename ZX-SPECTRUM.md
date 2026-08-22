@@ -9,7 +9,7 @@ The ZX Spectrum 48K port adapts the CP/M version to use ZX Spectrum ROM routines
 ## Key Differences from CP/M Version
 
 ### Memory Layout
-- **Origin Address**: 0x8000 (32768) instead of 0x0100
+- **Origin Address**: 0x6000 (24576) instead of 0x0100
 - Uses high memory to avoid overwriting BASIC system variables
 - Compatible with ZX Spectrum 48K memory map
 
@@ -77,8 +77,9 @@ Most ZX Spectrum emulators support TAP files:
    ```
    Then in BASIC:
    ```basic
+   CLEAR 24575
    LOAD "" CODE
-   RANDOMIZE USR 32768
+   RANDOMIZE USR 24576
    ```
 
 2. **ZEsarUX**:
@@ -103,13 +104,14 @@ Transfer TAP files to real ZX Spectrum using:
 Once the TAP is loaded (via emulator or real hardware):
 
 ```basic
+CLEAR 24575
 LOAD "" CODE
 ```
 
 Wait for loading to complete, then run:
 
 ```basic
-RANDOMIZE USR 32768
+RANDOMIZE USR 24576
 ```
 
 The program will:
@@ -136,26 +138,48 @@ Type `!` to exit back to BASIC.
 
 ### Memory Usage
 
-Typical memory layout for a 256→192→128→64 architecture:
+The image is one contiguous block loaded at `ORG_ADDR`, laid out as code,
+then runtime variables and buffers, then the weights — which dominate.
 
-| Section | Size | Address Range | Description |
-|---------|------|---------------|-------------|
-| Code | ~5 KB | 0x8000-0x93FF | Z80 machine code |
-| Variables | ~100 bytes | 0x9400-0x9463 | Runtime variables |
-| Input Buffer | 62 bytes | 0x9464-0x94A1 | User input |
-| Token Buffer | 512 bytes | 0x94A2-0x96A1 | Trigram buckets (256 × 2) |
-| Hidden Buffers | ~800 bytes | 0x96A2-0x99C1 | Layer activations |
-| Output Buffer | 128 bytes | 0x99C2-0x9A41 | Character scores |
-| Weights | ~28 KB | 0x9A42-0xFFFF | 2-bit quantized weights |
+| Section | Size | Description |
+|---------|------|-------------|
+| Code | ~2.5 KB | Z80 machine code |
+| Variables + input buffer | ~90 bytes | Runtime state, 62-byte input line |
+| Token buffer | 512 bytes | 256 buckets × 2 bytes (128 query + 128 context) |
+| Hidden buffers | 2 × max layer × 2 bytes | Ping-ponged layer activations |
+| Output buffer | charset × 2 bytes | Character scores |
+| Weights + biases | remainder | 2-bit packed weights, 16-bit biases |
 
-**Total**: ~35-40 KB (fits comfortably in 48K)
+The load address bounds how large a model can be, since RAM ends at `0xFFFF`:
+
+| Load address | Available |
+|---|---|
+| `0x6000` (default) | 40,960 bytes |
+| `0x8000` (pre-fix) | 32,768 bytes |
+
+The two shipped examples assemble to 38,981 and 40,054 bytes, so **neither fits
+above `0x8000`** — that was a real bug, and `.TAP` files built before the move
+to `0x6000` ran past the end of the address space and could not load at all.
+`buildz80tap.py` now refuses to emit an image that would not fit, and reports
+the headroom left:
+
+```
+Loads at 0x6000-0xf844, 1,979 bytes of RAM to spare
+```
+
+If you need more room, either lower `--org` (0x6000 is already just above the
+system variables) or train a narrower model.
 
 ### Performance
 
-On a 3.5 MHz Z80:
-- **Inference time**: ~1-2 seconds per character
-- **Input processing**: Near-instant
-- **Total response time**: 2-10 seconds for typical outputs
+Measured with `bench.py`, which runs the build in an emulator and counts cycles.
+For the shipped 256→256→192→128→11 model on a 3.5 MHz Z80:
+
+- **Inference**: 41,169,261 T-states per character — about **12 seconds**
+- **Total response**: roughly 12 seconds × the number of characters emitted
+
+The CP/M `buildfastz80com.py` layout is around 9x quicker; the same index-list
+approach has not been ported to the ZX build yet.
 
 ### Compatibility
 
@@ -239,7 +263,7 @@ For ~10x faster inference with larger file size:
 
 ### Program crashes on run
 
-- Ensure using `RANDOMIZE USR 32768`
+- Ensure using `RANDOMIZE USR 24576`
 - Check model was built correctly
 - Verify sufficient memory (48K required)
 

@@ -52,7 +52,7 @@ Get running in under 5 minutes:
 **3. Run:**
 
 - **CP/M**: `iz-cpm CHAT.COM`
-- **ZX Spectrum**: `fuse --tape CHAT.TAP`, then `LOAD "" CODE` and `RANDOMIZE USR 32768`
+- **ZX Spectrum**: `fuse --tape CHAT.TAP`, then `CLEAR 24575`, `LOAD "" CODE` and `RANDOMIZE USR 24576`
 - **Agon Light / eZ80**: copy `CHAT.bin` to the SD card and run it by name
 
 For building from source or training your own models, see [TRAINING.md](TRAINING.md).

@@ -26,9 +26,16 @@ ZX_CHAN_OPEN = 0x1601 # Open channel
 ZX_INPUT_LINE = 0x0F2C # Input line routine
 MAX_OUTPUT_LEN = 50   # Maximum characters to generate
 
-# Memory layout for ZX Spectrum 48K
-# We'll use high memory area starting at 32768 (0x8000)
-ORG_ADDR = 0x8000
+# Memory layout for ZX Spectrum 48K.
+#
+# RAM runs to FFFFh, so the load address bounds how large a model can be: at the
+# old 8000h only 32,768 bytes were available, which both shipped examples
+# exceed. 6000h is the lowest address that is clear of the screen (4000-5AFFh),
+# the printer buffer (5B00-5BFFh) and the system variables (5C00-5CCAh), and
+# leaves room below it for the BASIC loader once RAMTOP is moved down with
+# CLEAR. That gives 40,960 bytes.
+ORG_ADDR = 0x6000
+ZX_RAM_TOP = 0x10000  # one past the last byte of RAM on a 48K machine
 
 
 def pack_2bit_weights(weights: np.ndarray) -> bytes:
@@ -97,8 +104,13 @@ def build_tap_data(data: bytes) -> bytes:
 
 
 def build_autoreg(model_path: str = 'command_model_autoreg.pt',
-                  max_output_len: int = MAX_OUTPUT_LEN):
-    """Build the autoregressive inference for ZX Spectrum"""
+                  max_output_len: int = MAX_OUTPUT_LEN,
+                  org: int = ORG_ADDR):
+    """Build the autoregressive inference for ZX Spectrum.
+
+    Raises:
+        ValueError: if the assembled image would not fit in RAM at ``org``.
+    """
 
     # Load model (supports both .pt and .npz formats)
     print(f"Loading model from {model_path}...")
@@ -129,7 +141,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
         packed_weights.append(pack_2bit_weights(params[f'{name}_weight']))
         biases.append(params[f'{name}_bias'])
 
-    b = Z80Builder(org=ORG_ADDR)
+    b = Z80Builder(org=org)
 
     # === MAIN ===
     b.label('START')
@@ -878,6 +890,17 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
         for v in biases[i]:
             b.dw(int(v) & 0xFFFF)
 
+    # A .TAP whose image runs past FFFFh cannot load on any Spectrum, so refuse
+    # to emit one rather than shipping a tape that fails halfway through.
+    end = b.org + len(b.build())
+    if end > ZX_RAM_TOP:
+        raise ValueError(
+            f"image is {len(b.code):,} bytes and would run to {end:#07x} from "
+            f"{b.org:#06x}, past the top of RAM ({ZX_RAM_TOP - 1:#06x}) by "
+            f"{end - ZX_RAM_TOP:,} bytes. Lower --org or train a smaller model: "
+            f"{ZX_RAM_TOP - b.org:,} bytes are available at {b.org:#06x}."
+        )
+
     return b
 
 
@@ -888,11 +911,13 @@ if __name__ == '__main__':
                         help='Model file to load')
     parser.add_argument('--output', '-o', type=str, default='CHAT.TAP',
                         help='Output .TAP file')
+    parser.add_argument('--org', type=lambda v: int(v, 0), default=ORG_ADDR,
+                        help=f'Load address (default {ORG_ADDR:#06x})')
     args = parser.parse_args()
 
     print("Building ZX Spectrum CHAT.TAP...\n")
 
-    b = build_autoreg(args.model)
+    b = build_autoreg(args.model, org=args.org)
 
     # Show key addresses
     print("\nKey addresses:")
@@ -908,7 +933,7 @@ if __name__ == '__main__':
     tap_data = bytearray()
 
     # Header block
-    header = build_tap_header("CHAT", ORG_ADDR, len(b.code))
+    header = build_tap_header("CHAT", b.org, len(b.code))
     tap_data.extend(header)
 
     # Data block
@@ -919,8 +944,13 @@ if __name__ == '__main__':
     with open(args.output, 'wb') as f:
         f.write(tap_data)
 
+    headroom = ZX_RAM_TOP - (b.org + len(b.code))
     print(f"Total code size: {len(b.code)} bytes ({len(b.code)/1024:.1f} KB)")
     print(f"TAP file size: {len(tap_data)} bytes")
+    print(f"Loads at {b.org:#06x}-{b.org + len(b.code) - 1:#06x}, "
+          f"{headroom:,} bytes of RAM to spare")
     print(f"Saved to {args.output}")
-    print(f"\nLoad in ZX Spectrum with: LOAD \"\" CODE")
-    print(f"Then run with: RANDOMIZE USR {ORG_ADDR}")
+    print("\nIn ZX Spectrum BASIC:")
+    print(f"  CLEAR {b.org - 1}")
+    print('  LOAD "" CODE')
+    print(f"  RANDOMIZE USR {b.org}")
