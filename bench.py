@@ -34,13 +34,13 @@ TARGETS = {
 }
 
 
-def _host(target: str, query: str):
+def _host(target: str, query: str, org: int):
+    """Build the host for ``target``, loading at the address the build uses."""
     if target == "tap":
-        return ZXHost(stdin=[query, "!"]), 0x8000
+        return ZXHost(stdin=[query, "!"], org=org)
     if target == "ez80":
-        host = AgonHost(stdin=[query, "!"])
-        return host, host.LOAD_ADDR
-    return CPMHost(cmdline=query), 0x0100
+        return AgonHost(stdin=[query, "!"])
+    return CPMHost(cmdline=query)
 
 
 def measure(target: str, model_path: str, query: str = "HELLO") -> dict:
@@ -49,14 +49,22 @@ def measure(target: str, model_path: str, query: str = "HELLO") -> dict:
     builder = module.build_autoreg(model_path, max_output_len=1)
     image = builder.build()
 
-    host, org = _host(target, query)
+    # Always take the load address from the builder: hardcoding it here meant
+    # the ZX numbers were measured on an image loaded at the wrong address once
+    # its origin moved.
+    org = builder.org
+    host = _host(target, query, org)
     cpu = host.cpu
     cpu.load(org, image)
     cpu.pc = org
 
     cpu.run(max_cycles=2_000_000_000, stop_pc=builder.labels["GENLOOP"])
+    if cpu.pc != builder.labels["GENLOOP"]:
+        raise RuntimeError(f"{target}: never reached the generation loop")
     start_t, start_i = cpu.tstates, cpu.instructions
     cpu.run(max_cycles=2_000_000_000, stop_pc=builder.labels["ARGMAX"])
+    if cpu.pc != builder.labels["ARGMAX"]:
+        raise RuntimeError(f"{target}: never completed a forward pass")
 
     return {
         "target": target,

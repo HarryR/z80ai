@@ -55,7 +55,7 @@ class ZXPlatform(libnn.Platform):
 
     name = "ZX Spectrum"
     buffer = "TOKBUF"
-    weight_layout = "plain"
+    weight_layout = "rotated"
 
     def print_char(self, b: Z80Builder) -> None:
         b.rst(ZX_PRINT_A)
@@ -68,8 +68,12 @@ class ZXPlatform(libnn.Platform):
 
 
 def pack_2bit_weights(weights: np.ndarray) -> bytes:
-    """Pack 2-bit weights, four per byte, one output neuron per whole bytes."""
-    return pack_2bit(weights, layout="plain")
+    """Pack 2-bit weights, four per byte, one output neuron per whole bytes.
+
+    Uses the same scrambled nibble order as the CP/M build so both share one
+    inner loop; see :func:`libinfer.pack_2bit`.
+    """
+    return pack_2bit(weights, layout="rotated")
 
 
 def build_tap_header(filename: str, start: int, length: int) -> bytes:
@@ -180,112 +184,6 @@ def emit_read_input(b: Z80Builder) -> None:
     b.ret()
 
 
-def emit_layer_plain(b: Z80Builder) -> None:
-    """Emit LAYER for the plain 2-bit layout, where a code maps to value - 2."""
-    b.label("LAYER")
-    b.ld_mem_label_bc("SAVCNT")
-    b.ld_mem_label_hl("SAVW")
-    b.ld_mem_label_de("SAVB")
-
-    b.label("LNEUR")
-    b.push_bc()
-    b.ld_hl_nn(0)
-    b.ld_mem_label_hl("ACC")
-    b.push_ix()
-    b.pop_hl()
-    b.ld_mem_label_hl("CURIN")
-    b.ld_hl_mem_label("SAVW")
-    b.ld_a_mem_label("SAVCNT")
-    b.ld_b_a()
-    b.ld_c_n(0)
-
-    b.label("LWT")
-    b.push_bc()
-    b.ld_a_c()
-    b.and_n(0x03)
-    b.jr_nz("LSAME")
-    b.ld_hl_mem_label("SAVW")
-    b.ld_a_hl()
-    b.ld_mem_label_a("PACKED")
-    b.inc_hl()
-    b.ld_mem_label_hl("SAVW")
-
-    b.label("LSAME")
-    b.ld_a_mem_label("PACKED")
-    b.and_n(0x03)
-    b.sub_n(2)
-    b.ld_mem_label_a("WEIGHT")
-    b.ld_a_mem_label("PACKED")
-    b.rrca()
-    b.rrca()
-    b.ld_mem_label_a("PACKED")
-    b.ld_hl_mem_label("CURIN")
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.inc_hl()
-    b.ld_mem_label_hl("CURIN")
-    b.ld_a_mem_label("WEIGHT")
-    b.call("MULADD")
-    b.pop_bc()
-    b.inc_c()
-    b.djnz("LWT")
-
-    b.ld_hl_mem_label("SAVB")
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.inc_hl()
-    b.ld_mem_label_hl("SAVB")
-    b.ld_hl_mem_label("ACC")
-    b.add_hl_de()
-    b.ld_mem_label_hl("ACC")
-    b.sra_h()
-    b.rr_l()
-    b.sra_h()
-    b.rr_l()
-    b.ld_iyd_l(0)
-    b.ld_iyd_h(1)
-    b.inc_iy()
-    b.inc_iy()
-    b.pop_bc()
-    b.dec_b()
-    b.jp_nz("LNEUR")
-    b.ret()
-
-
-def emit_muladd_plain(b: Z80Builder) -> None:
-    """Emit MULADD for the plain layout, entered with the signed weight in A."""
-    b.label("MULADD")
-    b.or_a()
-    b.jr_z("MA_RET")
-    b.jp_m("MA_NEG")
-    b.ld_hl_mem_label("ACC")
-    b.add_hl_de()
-    b.ld_mem_label_hl("ACC")
-    b.ret()
-
-    b.label("MA_NEG")
-    b.cp_n(0xFF)
-    b.jr_z("MA_N1")
-    b.ld_hl_mem_label("ACC")
-    b.or_a()
-    b.sbc_hl_de()
-    b.or_a()  # clear carry: the sbc above may have borrowed
-    b.sbc_hl_de()
-    b.ld_mem_label_hl("ACC")
-    b.ret()
-
-    b.label("MA_N1")
-    b.ld_hl_mem_label("ACC")
-    b.or_a()
-    b.sbc_hl_de()
-    b.ld_mem_label_hl("ACC")
-
-    b.label("MA_RET")
-    b.ret()
-
-
 def build_autoreg(
     model_path: str = "command_model_autoreg.pt",
     max_output_len: int = MAX_OUTPUT_LEN,
@@ -377,8 +275,8 @@ def build_autoreg(
     libnn.emit_ctx_hash(b, plat)
     libnn.emit_clear_ctx(b, plat)
     libnn.emit_layer_dispatch(b, plans)
-    emit_layer_plain(b)
-    emit_muladd_plain(b)
+    libnn.emit_layer(b)
+    libnn.emit_muladd(b)
     libnn.emit_relu(b, plans)
     libnn.emit_argmax(b, output_size)
     libnn.emit_tokenizer(b, plat)

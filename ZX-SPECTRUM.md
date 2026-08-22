@@ -157,14 +157,14 @@ The load address bounds how large a model can be, since RAM ends at `0xFFFF`:
 | `0x6000` (default) | 40,960 bytes |
 | `0x8000` (pre-fix) | 32,768 bytes |
 
-The two shipped examples assemble to 38,981 and 40,054 bytes, so **neither fits
+The two shipped examples assemble to 38,949 and 40,022 bytes, so **neither fits
 above `0x8000`** — that was a real bug, and `.TAP` files built before the move
 to `0x6000` ran past the end of the address space and could not load at all.
 `buildz80tap.py` now refuses to emit an image that would not fit, and reports
 the headroom left:
 
 ```
-Loads at 0x6000-0xf844, 1,979 bytes of RAM to spare
+Loads at 0x6000-0xf824, 2,011 bytes of RAM to spare
 ```
 
 If you need more room, either lower `--org` (0x6000 is already just above the
@@ -175,11 +175,16 @@ system variables) or train a narrower model.
 Measured with `bench.py`, which runs the build in an emulator and counts cycles.
 For the shipped 256→256→192→128→11 model on a 3.5 MHz Z80:
 
-- **Inference**: 41,169,261 T-states per character — about **12 seconds**
-- **Total response**: roughly 12 seconds × the number of characters emitted
+- **Inference**: 26,843,795 T-states per character — about **7.7 seconds**
+- **Total response**: roughly 7.7 seconds × the number of characters emitted
 
-The CP/M `buildfastz80com.py` layout is around 9x quicker; the same index-list
-approach has not been ported to the ZX build yet.
+The ZX build shares its inner loop with the CP/M one (`libnn.emit_layer`). It
+used to carry its own slower copy, which cost 36% more instructions per
+character and was where the `MULADD` borrow bug survived a first fix.
+
+The CP/M `buildfastz80com.py` index-list layout is around 9x quicker again; it
+has not been ported to the ZX build, where the 40,960-byte ceiling makes the
+extra size hard to afford.
 
 ### Compatibility
 

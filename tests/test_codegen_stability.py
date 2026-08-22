@@ -44,10 +44,12 @@ GOLDEN = {
 # The .TAP hashes cover the container, not the raw image, so they are checked
 # through the same header/data blocks the build script writes.
 GOLDEN_TAP = {
+    # Changed when the ZX build adopted the CP/M inner loop: same arithmetic,
+    # 26% fewer instructions, 32 bytes smaller.
     "GUESS.TAP": ("guess",
-                  "4d3a4f26dcfe286e0a4d3bb7d20d18f4202d791506029f707d1cc0dba3c6eae7"),
+                  "f357b874901daec1f8ced9df2b0ff529471eef04a7d1256165d232ad48b46d86"),
     "CHAT.TAP": ("tinychat",
-                 "9570ee86681ffac7206d124751336e8f5197dfc9592cf06c34928a0790d4252c"),
+                 "0287509b474133e1d57abdf76796d43a91d343559dc1055f67832ea0b113e59c"),
 }
 
 

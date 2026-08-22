@@ -90,6 +90,7 @@ Z80-μLM runs on multiple Z80-based platforms:
 
 - **CP/M**: Original target platform. Generates `.COM` files using `buildz80com.py`
   (packed weights) or `buildfastz80com.py` (index lists, ~9x faster, slightly larger)
+  - Both share their code generator with the ZX build; see `libnn.py`
 - **ZX Spectrum 48K**: Full support via `buildz80tap.py`. See [ZX-SPECTRUM.md](ZX-SPECTRUM.md) for details
   - Generates `.TAP` files for emulators or real hardware
   - Uses ZX Spectrum ROM routines for I/O
@@ -111,7 +112,7 @@ costs. For the shipped 256→256→192→128→11 `guess` model:
 |---|---|---|---|---|
 | CP/M, packed weights | 38,920 | 3,004,037 | 26,843,795 | 6.71 @ 4 MHz |
 | CP/M, index lists | 43,520 | 319,515 | 1,992,905 | 0.50 @ 4 MHz |
-| ZX Spectrum | 38,981 | 4,245,425 | 41,169,261 | 11.76 @ 3.5 MHz |
+| ZX Spectrum | 38,949 | 3,004,037 | 26,843,795 | 7.67 @ 3.5 MHz |
 | Agon eZ80 | 146,581 | 923,194 | — | — |
 
 ```bash

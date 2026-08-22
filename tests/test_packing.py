@@ -58,9 +58,18 @@ def test_plain_layout_codes():
 
 
 def test_builders_delegate_to_the_shared_packer():
+    """Both packed backends use the rotated layout, so they share one kernel."""
     w = np.random.default_rng(3).integers(-2, 2, size=(6, 10))
     assert buildz80com.pack_2bit_weights(w) == libinfer.pack_2bit(w, "rotated")
-    assert buildz80tap.pack_2bit_weights(w) == libinfer.pack_2bit(w, "plain")
+    assert buildz80tap.pack_2bit_weights(w) == libinfer.pack_2bit(w, "rotated")
+
+
+def test_the_plain_layout_is_still_supported():
+    """Nothing emits it now, but it is the natural encoding and stays tested."""
+    w = np.random.default_rng(4).integers(-2, 2, size=(3, 9))
+    np.testing.assert_array_equal(
+        libinfer.unpack_2bit(libinfer.pack_2bit(w, "plain"), w.shape, "plain"), w
+    )
 
 
 def test_fast_builder_index_lists_reproduce_the_weights():
