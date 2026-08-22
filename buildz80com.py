@@ -92,7 +92,6 @@ def build_autoreg(
     # Sorted numerically, not lexically: a 10-layer model would otherwise run
     # fc10 straight after fc1.
     layer_names, layer_sizes = discover_layers(params)
-    num_layers = len(layer_names)
     input_size, output_size = layer_sizes[0], layer_sizes[-1]
 
     print(f"Architecture: {' → '.join(map(str, layer_sizes))}")

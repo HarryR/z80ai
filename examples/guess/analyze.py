@@ -4,6 +4,7 @@
 import sys
 from collections import Counter
 
+
 def analyze(filepath):
     answers = Counter()
     total = 0
@@ -16,12 +17,12 @@ def analyze(filepath):
             if '|' not in line:
                 continue
 
-            q, a = line.rsplit('|', 1)
+            _query, a = line.rsplit('|', 1)
             answers[a.upper()] += 1
             total += 1
 
     print(f"Total pairs: {total:,}")
-    print(f"\nAnswer distribution:")
+    print("\nAnswer distribution:")
     print("-" * 40)
 
     for answer, count in answers.most_common():

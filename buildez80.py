@@ -76,7 +76,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
 
     eos_idx = len(charset) - 1
     num_chars = len(charset)
-    print(f"Charset ({num_chars} chars): {repr(charset[:-1])} + EOS")
+    print(f"Charset ({num_chars} chars): {charset[:-1]!r} + EOS")
 
     layer_names, layer_sizes = discover_layers(params)
     num_layers = len(layer_names)
@@ -600,9 +600,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
         b.label(name)
         b.db(0)
 
-    b.label('TMP0'); b.db(0)
-    b.label('TMP1'); b.db(0)
-    b.label('TMP2'); b.db(0)
+    # A three-byte scratch the layer shifts in place, byte by byte.
+    for name in ('TMP0', 'TMP1', 'TMP2'):
+        b.label(name)
+        b.db(0)
 
     for name in ('SPSAV', 'INBASE', 'BIASP', 'TMPV'):
         b.label(name)

@@ -1,11 +1,35 @@
-# CI gates on defects only: syntax errors, undefined names, broken comparisons
-# and redefinitions. Ruff's wider default set flags a fair amount of
-# pre-existing style debt - notably the one-line opcode definitions in
-# libz80.py, which are deliberate - so the rest is reported in the job summary
-# rather than blocking a merge. See the "Lint" job in .github/workflows/ci.yml.
+# Lint configuration. CI gates on everything selected here; see the "Lint" job
+# in .github/workflows/ci.yml.
 
 line-length = 100
+target-version = "py310"
 exclude = [".venv", "venv", "build", "dist"]
 
 [lint]
-select = ["E9", "F63", "F7", "F82", "F811"]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes: undefined names, unused imports, broken f-strings
+    "B",     # bugbear: mutable defaults, unused loop variables, zip strictness
+    "C4",    # comprehension style
+    "SIM",   # simplifications
+    "UP",    # modern syntax for the Python versions we support
+    "I",     # import ordering
+    "PERF",  # obvious performance mistakes
+    "RUF",   # ruff's own checks
+]
+
+[lint.per-file-ignores]
+# libz80.py is an opcode table: one instruction per line, body on the same
+# line, is what makes it readable as a table rather than as code.
+"libz80.py" = ["E701", "E702"]
+# The example data generators shell out to LLM APIs and are deliberately
+# forgiving about which of them are reachable.
+"examples/**" = ["E722", "PERF203", "S110"]
+
+[lint.isort]
+known-first-party = [
+    "bench", "build", "buildez80", "buildfastz80com", "buildz80com",
+    "buildz80tap", "feedme", "libez80", "libhost", "libinfer", "libnn",
+    "libqat", "libz80", "libz80emu", "loadmodel", "verify_artifacts",
+]

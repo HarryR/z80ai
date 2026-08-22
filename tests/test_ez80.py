@@ -8,11 +8,12 @@ accumulator never wraps.
 
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
 import buildez80
 import buildz80com
 import libinfer
-import numpy as np
-import pytest
 from libez80 import AGON_LOAD_ADDR, EZ80Builder
 from libhost import AgonHost, run_agon, run_cpm
 from libz80emu import Z80
@@ -109,7 +110,7 @@ def tiny_ez80(tiny_model_path):
 
 
 def agon_reply(builder, query: str) -> str:
-    out, host = run_agon(builder.build(), stdin=[query, "!"], max_cycles=400_000_000)
+    out, _host = run_agon(builder.build(), stdin=[query, "!"], max_cycles=400_000_000)
     return out
 
 

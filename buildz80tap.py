@@ -210,7 +210,6 @@ def build_autoreg(
     print(f"Charset ({len(charset)} chars): {charset[:-1]!r} + EOS")
 
     layer_names, layer_sizes = discover_layers(params)
-    num_layers = len(layer_names)
     input_size, output_size = layer_sizes[0], layer_sizes[-1]
 
     print(f"Architecture: {' → '.join(map(str, layer_sizes))}")

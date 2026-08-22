@@ -7,9 +7,10 @@ Equality with what the Z80 actually computes is covered in ``test_kernels``.
 
 from __future__ import annotations
 
-import libinfer
 import numpy as np
 import pytest
+
+import libinfer
 
 BUCKETS = libinfer.NUM_BUCKETS
 W = libinfer.BUCKET_WEIGHT

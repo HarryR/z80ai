@@ -48,6 +48,8 @@ the bytes.
 | `test_model_shapes.py` | Layer discovery order, and the widths a Z80 backend can actually assemble |
 | `test_build_frontend.py` | Automatic target selection |
 | `test_verify_artifacts.py` | The release verifier's own failure paths |
+| `test_libnn.py` | Layer planning, the Platform contract, and that the public API stays annotated |
+| `test_codegen_stability.py` | The exact bytes each backend emits, by hash |
 
 ## In CI
 
@@ -56,7 +58,7 @@ matter are in `build`:
 
 | Check | What it stops |
 |---|---|
-| `ruff check` | Syntax errors, undefined names, broken comparisons, redefinitions. Style debt is reported in the job summary but not gated - see `ruff.toml` |
+| `ruff check` | pycodestyle, pyflakes, bugbear, comprehensions, simplifications, modern syntax, import order and performance rules. Two justified `noqa`s remain, both explained inline - see `ruff.toml` |
 | Test matrix | Python 3.10 through 3.13, `fail-fast: false` so one version failing doesn't hide the rest |
 | Reproducible build | Builds everything twice and compares byte for byte. A build that picks up dict ordering or a hash seed would stop matching what anyone can rebuild |
 | Artifact verification | Boots every release binary in the emulator and compares its output to the reference. **A binary that assembles but computes the wrong answer cannot reach a release** |

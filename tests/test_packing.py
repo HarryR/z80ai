@@ -7,12 +7,13 @@ boundary.  Getting that wrong silently shifts every weight after the first row.
 
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
 import buildfastz80com
 import buildz80com
 import buildz80tap
 import libinfer
-import numpy as np
-import pytest
 
 LAYOUTS = ["plain", "rotated"]
 

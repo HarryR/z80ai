@@ -51,7 +51,7 @@ def trigram_encode(text: str, num_buckets: int = NUM_BUCKETS) -> np.ndarray:
     if not text:
         return vec
     chars = [_lower(c) for c in text]
-    padded = [" "] + chars + [" "]
+    padded = [" ", *chars, " "]
     for i in range(len(padded) - 2):
         vec[hash16("".join(padded[i : i + 3])) % num_buckets] += BUCKET_WEIGHT
     return vec
@@ -99,7 +99,7 @@ class Model:
         return [self.input_size] + [int(w.shape[0]) for w in self.weights]
 
     @classmethod
-    def from_params(cls, params: dict, charset: str) -> "Model":
+    def from_params(cls, params: dict, charset: str) -> Model:
         names = sorted(
             {k.replace("_weight", "").replace("_bias", "") for k in params},
             key=lambda n: int(n[2:]),
@@ -111,7 +111,7 @@ class Model:
         )
 
     @classmethod
-    def load(cls, path: str) -> "Model":
+    def load(cls, path: str) -> Model:
         from loadmodel import load_model_params
 
         params, _arch, charset = load_model_params(path)
@@ -127,7 +127,7 @@ class Model:
 
     def save_npz(self, path: str) -> None:
         out: dict[str, np.ndarray] = {}
-        for i, (w, b) in enumerate(zip(self.weights, self.biases), start=1):
+        for i, (w, b) in enumerate(zip(self.weights, self.biases, strict=True), start=1):
             out[f"fc{i}_weight"] = w.astype(np.int8)
             out[f"fc{i}_bias"] = b.astype(np.int16)
         out["_architecture"] = np.array(json.dumps(self.architecture()).encode())
@@ -151,7 +151,7 @@ def forward(model: Model, x: np.ndarray, accum_bits: int = 16) -> np.ndarray:
     """
     acc = np.asarray(x, dtype=np.int64)
     last = model.num_layers - 1
-    for i, (w, bias) in enumerate(zip(model.weights, model.biases)):
+    for i, (w, bias) in enumerate(zip(model.weights, model.biases, strict=True)):
         acc = wrap(w.astype(np.int64) @ acc + bias.astype(np.int64), accum_bits)
         acc = acc >> SHIFT  # arithmetic shift: floors, like SRA H / RR L
         if i != last:

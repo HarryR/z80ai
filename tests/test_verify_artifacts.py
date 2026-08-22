@@ -6,8 +6,9 @@ A verifier that silently passes everything is worse than no verifier.
 
 from __future__ import annotations
 
-import buildz80tap
 import pytest
+
+import buildz80tap
 import verify_artifacts as va
 
 

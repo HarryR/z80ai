@@ -19,11 +19,12 @@ from __future__ import annotations
 import hashlib
 import os
 
+import pytest
+
 import buildez80
 import buildfastz80com
 import buildz80com
 import buildz80tap
-import pytest
 
 # artifact -> (module, example, sha256 of the image as written to disk)
 GOLDEN = {

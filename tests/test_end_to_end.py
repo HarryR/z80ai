@@ -9,11 +9,12 @@ shows up here.
 
 from __future__ import annotations
 
+import pytest
+
 import buildfastz80com
 import buildz80com
 import buildz80tap
 import libinfer
-import pytest
 from libhost import run_cpm, run_zx
 
 QUERIES = ["HELLO", "ARE YOU A ROBOT", "X", "WHAT IS THIS THING"]

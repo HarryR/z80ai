@@ -51,8 +51,11 @@ fastest version that fits.
 import numpy as np
 
 import libnn
-from buildz80com import BDOS, BDOS_CONSOLE_OUT, BDOS_PRINT_STRING, BDOS_READ_LINE
-from buildz80com import CPM_CMDLINE, CPMPlatform
+from buildz80com import (
+    BDOS,
+    CPM_CMDLINE,
+    CPMPlatform,
+)
 from libinfer import discover_layers, validate_z80_layers
 from libz80 import Z80Builder
 from loadmodel import load_model_params
@@ -80,12 +83,8 @@ def pack_weights_and_biases(weights: np.ndarray, biases: np.ndarray) -> bytes:
     wt_bias = []
     for n in range(0, weights.shape[0]):
         flat = np.clip(weights[n], -2, 1).astype(np.int8)
-        for w in [ -2, -1, 1 ]:
-            indices = []
-            for i in range(0, len(flat)):
-                if flat[i] == w:
-                    indices.append(i)
-
+        for w in (-2, -1, 1):
+            indices = [i for i, v in enumerate(flat) if v == w]
             wt_bias.append(len(indices))
             wt_bias += indices
         bias_val = int(biases[n]) & 0xFFFF
@@ -95,27 +94,37 @@ def pack_weights_and_biases(weights: np.ndarray, biases: np.ndarray) -> bytes:
     return bytes(wt_bias)
 
 
-def sum_wt(b: Z80Builder, w: int):
-   if w > 0: b.add_a_hl()
-   if w < 0: b.sub_a_hl()
+def sum_wt(b: Z80Builder, w: int) -> None:
+    """Emit ADD or SUB of (HL) into A, according to the sign of the weight.
+
+    ``w`` is one of {-2, -1, +1}; zero weights never reach the inner loop,
+    which is the whole point of the index-list layout.
+    """
+    if w > 0:
+        b.add_a_hl()
+    else:
+        b.sub_a_hl()
 
 
-def sum_wt_carry(b: Z80Builder, w: int):
-   if w > 0: b.adc_a_hl()
-   if w < 0: b.sbc_a_hl()
+def sum_wt_carry(b: Z80Builder, w: int) -> None:
+    """As :func:`sum_wt`, but carrying in from the low half of the accumulator."""
+    if w > 0:
+        b.adc_a_hl()
+    else:
+        b.sbc_a_hl()
 
 
 def build_autoreg(model_path: str = 'command_model_autoreg.pt',
-                  max_output_len: int = MAX_OUTPUT_LEN):
+                  max_output_len: int = MAX_OUTPUT_LEN) -> Z80Builder:
     """Build the autoregressive inference .COM"""
 
     # Load model (supports both .pt and .npz formats)
     print(f"Loading model from {model_path}...")
-    params, arch, charset = load_model_params(model_path)
+    params, _arch, charset = load_model_params(model_path)
 
     eos_idx = len(charset) - 1
     num_chars = len(charset)
-    print(f"Charset ({num_chars} chars): {repr(charset[:-1])} + EOS")
+    print(f"Charset ({num_chars} chars): {charset[:-1]!r} + EOS")
 
     # Discover layers. Sorted numerically, not lexically: a 10-layer model
     # would otherwise run fc10 straight after fc1.
@@ -131,10 +140,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
 
     validate_z80_layers(layer_sizes)
 
-    # Pack weights and biases
-    weights_biases = []
-    for name in layer_names:
-        weights_biases.append(pack_weights_and_biases(params[f'{name}_weight'], params[f'{name}_bias']))
+    weights_biases = [
+        pack_weights_and_biases(params[f'{name}_weight'], params[f'{name}_bias'])
+        for name in layer_names
+    ]
 
     plat = FastCPMPlatform()
     b = Z80Builder()
@@ -280,7 +289,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     #    B   number of outputs of last layer
     #    HL' last output buffer
 
-    b.label('INFER');
+    b.label('INFER')
 
     b.ld_e_hl() # number of layers
     b.inc_hl()
@@ -347,8 +356,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
         b.ld_a_e()
         sum_wt(b, w)
         b.jr_nc(f"c_ok{w+2}")
-        if w > 0: b.inc_c()
-        if w < 0: b.dec_c()
+        if w > 0:
+            b.inc_c()
+        else:
+            b.dec_c()
         b.label(f"c_ok{w+2}")
         b.djnz(f"wt{w+2}")
         if w == -2:
@@ -484,13 +495,17 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.db(13, 10, ord('$'))
 
     # INFER parks the stack pointer here while it walks the weights with POP.
-    b.label('SPSAV'); b.dw(0)
+    b.label('SPSAV')
+    b.dw(0)
     libnn.emit_engine_variables(b)
 
     # Chat mode buffer (BDOS function 10 format)
-    b.label('CHATBUF'); b.db(CHAT_BUFFER_SIZE)  # capacity, read by BDOS
-    b.label('CHATLEN'); b.db(0)                 # length, written by BDOS
-    b.label('CHATDAT'); b.ds(CHAT_BUFFER_SIZE)
+    b.label('CHATBUF')
+    b.db(CHAT_BUFFER_SIZE)  # capacity, read by BDOS
+    b.label('CHATLEN')
+    b.db(0)  # length, written by BDOS
+    b.label('CHATDAT')
+    b.ds(CHAT_BUFFER_SIZE)
 
     b.label('NETWORK')
     b.db(num_layers)
@@ -503,12 +518,15 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.align(256)
     if input_size > 256:
         raise ValueError(f"Input size {input_size} is too big; limit 256.")
-    b.label('INBUF'); b.ds(256 * 2)  # 256 buckets * 2 bytes
+    b.label('INBUF')
+    b.ds(256 * 2)  # 256 buckets * 2 bytes
     max_hidden = max(layer_sizes[1:-1]) if len(layer_sizes) > 2 else layer_sizes[1]
     if max_hidden > 256:
         raise ValueError(f"Layer size {max_hidden} is too big; limit 256.")
-    b.label('BUF_A'); b.ds(256 * 2)
-    b.label('BUF_B'); b.ds(256 * 2)
+    b.label('BUF_A')
+    b.ds(256 * 2)
+    b.label('BUF_B')
+    b.ds(256 * 2)
 
     return b
 

@@ -217,7 +217,8 @@ QUESTION_CATEGORIES = [
 ]
 
 
-def ollama_json(model: str, prompt: str, max_tokens: int = 200, temperature: float = 0.75) -> dict | None:
+def ollama_json(model: str, prompt: str,
+                max_tokens: int = 200, temperature: float = 0.75) -> dict | None:
     """Call Ollama API and return parsed JSON response."""
     global total_input_tokens, total_output_tokens
 
@@ -263,7 +264,8 @@ def claude_json(model: str, prompt: str, max_tokens: int = 200) -> dict | None:
     global total_input_tokens, total_output_tokens
 
     if not HAS_ANTHROPIC:
-        print("# Error: anthropic package not installed. Run: pip install anthropic", file=sys.stderr)
+        print("# Error: anthropic package not installed. Run: pip install anthropic",
+              file=sys.stderr)
         return None
 
     try:
@@ -271,7 +273,10 @@ def claude_json(model: str, prompt: str, max_tokens: int = 200) -> dict | None:
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt + "\nRespond with JSON only, no other text."}]
+            messages=[{
+                "role": "user",
+                "content": prompt + "\nRespond with JSON only, no other text.",
+            }]
         )
 
         # Track tokens
@@ -290,7 +295,7 @@ def claude_json(model: str, prompt: str, max_tokens: int = 200) -> dict | None:
         if response_text.startswith("```"):
             lines = response_text.split("\n")
             # Remove first line (```json) and last line (```)
-            lines = [l for l in lines if not l.startswith("```")]
+            lines = [line for line in lines if not line.startswith("```")]
             response_text = "\n".join(lines).strip()
 
         try:
@@ -446,7 +451,7 @@ Return JSON: {{"pairs": [{{"q": "is it alive", "a": "NO"}}, ...]}}"""
 
     parsed = api_json(model, prompt, max_tokens=500)
     if not parsed:
-        print(f"# generate_qa_batch: api returned None", file=sys.stderr)
+        print("# generate_qa_batch: api returned None", file=sys.stderr)
         return []
 
     raw_pairs = parsed.get("pairs", [])
@@ -518,8 +523,7 @@ def generate_wrong_guesses(distractors: list[str]) -> list[tuple[str, str]]:
             f"i guess {wrong}",
             f"{wrong}?",
         ]
-        for phrase in wrong_phrases:
-            pairs.append((phrase.lower(), "NO"))
+        pairs.extend((phrase.lower(), "NO") for phrase in wrong_phrases)
     return pairs
 
 
@@ -528,27 +532,39 @@ def main():
 
     parser = argparse.ArgumentParser(description='Generate 20 questions training data')
     parser.add_argument('--topic', '-t', required=True, help='The secret topic/thing')
-    parser.add_argument('-n', '--count', type=int, default=100, help='Number of Q&A pairs to generate')
-    parser.add_argument('--model', '-m', default=None, help='Model to use (default: gemma2:9b for ollama, claude-sonnet-4 for claude)')
+    parser.add_argument('-n', '--count', type=int, default=100,
+                        help='Number of Q&A pairs to generate')
+    parser.add_argument('--model', '-m', default=None,
+                        help='Model to use (default: gemma2:9b for ollama, '
+                             'claude-sonnet-4 for claude)')
     parser.add_argument('--claude', action='store_true', help='Use Claude API instead of Ollama')
-    parser.add_argument('--batch', '-b', type=int, default=10, help='Questions per LLM call')
-    parser.add_argument('--distractors', '-d', type=int, default=10, help='Number of wrong guesses to auto-generate (0 to disable)')
-    parser.add_argument('--nonsense', action='store_true', help='Add nonsense/gibberish -> IDK training')
-    parser.add_argument('--paraphrase', '-p', type=int, default=0, help='Generate N paraphrases per question (costs more tokens)')
-    parser.add_argument('--yes-only', action='store_true', help='Only generate YES-answer questions (to rebalance data)')
-    parser.add_argument('--win-only', action='store_true', help='Only generate WIN variations (different ways to guess the topic)')
+    parser.add_argument('--batch', '-b', type=int, default=10,
+                        help='Questions per LLM call')
+    parser.add_argument('--distractors', '-d', type=int, default=10,
+                        help='Number of wrong guesses to auto-generate (0 to disable)')
+    parser.add_argument('--nonsense', action='store_true',
+                        help='Add nonsense/gibberish -> IDK training')
+    parser.add_argument('--paraphrase', '-p', type=int, default=0,
+                        help='Generate N paraphrases per question (costs more tokens)')
+    parser.add_argument('--yes-only', action='store_true',
+                        help='Only generate YES-answer questions (to rebalance data)')
+    parser.add_argument('--win-only', action='store_true',
+                        help='Only generate WIN variations (different ways to guess the topic)')
     args = parser.parse_args()
 
     # Set up API backend
     if args.claude:
         if not HAS_ANTHROPIC:
-            print("# Error: anthropic package not installed. Run: pip install anthropic", file=sys.stderr)
+            print("# Error: anthropic package not installed. Run: pip install anthropic",
+                  file=sys.stderr)
             sys.exit(1)
-        api_json = lambda model, prompt, max_tokens=200: claude_json(model, prompt, max_tokens)
+        def api_json(model, prompt, max_tokens=200):
+            return claude_json(model, prompt, max_tokens)
         if args.model is None:
             args.model = DEFAULT_CLAUDE_MODEL
     else:
-        api_json = lambda model, prompt, max_tokens=200, temp=0.75: ollama_json(model, prompt, max_tokens, temp)
+        def api_json(model, prompt, max_tokens=200, temp=0.75):
+            return ollama_json(model, prompt, max_tokens, temp)
         if args.model is None:
             args.model = DEFAULT_MODEL
 
@@ -570,7 +586,7 @@ def main():
             while generated < args.count and not interrupted:
                 guesses = generate_win_guesses(args.model, topic, args.batch)
                 if not guesses:
-                    print(f"# No WIN guesses returned, retrying...", file=sys.stderr)
+                    print("# No WIN guesses returned, retrying...", file=sys.stderr)
                     stale_batches += 1
                     if stale_batches >= max_stale:
                         break
@@ -585,12 +601,17 @@ def main():
                         generated += 1
 
                 stale_batches = 0
-                print(f"# Progress: {generated}/{args.count} | tokens: {total_input_tokens:,}in/{total_output_tokens:,}out", file=sys.stderr, flush=True)
+                print(f"# Progress: {generated}/{args.count} | tokens: "
+                      f"{total_input_tokens:,}in/{total_output_tokens:,}out",
+                      file=sys.stderr, flush=True)
         except KeyboardInterrupt:
-            print(f"\n# Interrupted!", file=sys.stderr)
+            print("\n# Interrupted!", file=sys.stderr)
 
         print(f"# Generated {generated} WIN-only pairs", file=sys.stderr)
-        print(f"# Tokens - input: {total_input_tokens:,}, output: {total_output_tokens:,}, total: {total_input_tokens + total_output_tokens:,}", file=sys.stderr)
+        print(f"# Tokens - input: {total_input_tokens:,}, "
+              f"output: {total_output_tokens:,}, "
+              f"total: {total_input_tokens + total_output_tokens:,}",
+              file=sys.stderr)
         return
 
     # Generate Q&A in batches
@@ -600,7 +621,7 @@ def main():
             if args.yes_only:
                 yes_questions = generate_yes_questions(args.model, topic, args.batch)
                 if not yes_questions:
-                    print(f"# No YES questions returned, retrying...", file=sys.stderr)
+                    print("# No YES questions returned, retrying...", file=sys.stderr)
                     stale_batches += 1
                     if stale_batches >= max_stale:
                         print(f"# Giving up after {max_stale} failed batches", file=sys.stderr)
@@ -661,14 +682,19 @@ def main():
             new_this_batch = generated - prev_generated
             if new_this_batch == 0:
                 stale_batches += 1
-                print(f"# Stale batch (all duplicates), {stale_batches}/{max_stale}", file=sys.stderr)
+                print(f"# Stale batch (all duplicates), {stale_batches}/{max_stale}",
+                      file=sys.stderr)
                 if stale_batches >= max_stale:
-                    print(f"# Model exhausted - only generated {generated}/{args.count} unique pairs", file=sys.stderr)
+                    print(f"# Model exhausted - only generated "
+                          f"{generated}/{args.count} unique pairs",
+                          file=sys.stderr)
                     break
             else:
                 stale_batches = 0  # Reset on success
 
-            print(f"# Progress: {generated}/{args.count} (+{new_this_batch}) | tokens: {total_input_tokens:,}in/{total_output_tokens:,}out", file=sys.stderr, flush=True)
+            print(f"# Progress: {generated}/{args.count} (+{new_this_batch}) | "
+                  f"tokens: {total_input_tokens:,}in/{total_output_tokens:,}out",
+                  file=sys.stderr, flush=True)
     except KeyboardInterrupt:
         print(f"\n# Interrupted! Generated {generated} pairs so far", file=sys.stderr)
         interrupted = True
@@ -676,7 +702,10 @@ def main():
     # Skip WIN/distractors/nonsense in yes-only mode
     if args.yes_only:
         print(f"# Generated {generated} YES-only pairs", file=sys.stderr)
-        print(f"# Tokens - input: {total_input_tokens:,}, output: {total_output_tokens:,}, total: {total_input_tokens + total_output_tokens:,}", file=sys.stderr)
+        print(f"# Tokens - input: {total_input_tokens:,}, "
+              f"output: {total_output_tokens:,}, "
+              f"total: {total_input_tokens + total_output_tokens:,}",
+              file=sys.stderr)
         return
 
     # Add winning guesses - variations of the actual answer
@@ -742,7 +771,10 @@ def main():
         print(f"# Added {nonsense_count} nonsense phrases", file=sys.stderr)
 
     print(f"# Generated {generated} pairs", file=sys.stderr)
-    print(f"# Tokens - input: {total_input_tokens:,}, output: {total_output_tokens:,}, total: {total_input_tokens + total_output_tokens:,}", file=sys.stderr)
+    print(f"# Tokens - input: {total_input_tokens:,}, "
+              f"output: {total_output_tokens:,}, "
+              f"total: {total_input_tokens + total_output_tokens:,}",
+          file=sys.stderr)
 
 
 if __name__ == '__main__':

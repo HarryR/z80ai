@@ -8,11 +8,12 @@ against the reference, so a packing or accumulation bug cannot hide.
 
 from __future__ import annotations
 
-import buildz80com
-import libinfer
 import numpy as np
 import pytest
-from libhost import CPM_CMDLINE, CPMHost
+
+import buildz80com
+import libinfer
+from libhost import CPMHost
 from libz80emu import Z80
 
 

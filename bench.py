@@ -34,7 +34,7 @@ TARGETS = {
 }
 
 
-def _host(target: str, query: str, org: int):
+def _host(target: str, query: str, org: int) -> AgonHost | CPMHost | ZXHost:
     """Build the host for ``target``, loading at the address the build uses."""
     if target == "tap":
         return ZXHost(stdin=[query, "!"], org=org)

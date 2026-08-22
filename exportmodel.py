@@ -11,12 +11,14 @@ Usage:
 
 import argparse
 import json
+
 import numpy as np
 import torch
+
 from feedme import AutoregressiveModel
 
 
-def export_model(model_path: str, output_path: str):
+def export_model(model_path: str, output_path: str) -> None:
     """Export PyTorch checkpoint to NumPy npz format."""
     print(f"Loading model from {model_path}...")
     checkpoint = torch.load(model_path, weights_only=True)
@@ -24,8 +26,9 @@ def export_model(model_path: str, output_path: str):
     charset = checkpoint['charset']
     num_chars = len(charset)
 
-    print(f"Architecture: input={arch['input_size']}, hidden={arch['hidden_sizes']}, output={num_chars}")
-    print(f"Charset ({num_chars} chars): {repr(charset[:-1])} + EOS")
+    print(f"Architecture: input={arch['input_size']}, "
+          f"hidden={arch['hidden_sizes']}, output={num_chars}")
+    print(f"Charset ({num_chars} chars): {charset[:-1]!r} + EOS")
 
     # Create and load model
     model = AutoregressiveModel(
@@ -40,13 +43,9 @@ def export_model(model_path: str, output_path: str):
     params = model.get_quantized_params()
 
     # Build export dict
-    export_data = {}
+    export_data = dict(params)
 
-    # Add all weight/bias arrays
-    for key, value in params.items():
-        export_data[key] = value
-
-    # Add metadata as encoded strings
+    # Metadata rides along as encoded strings.
     export_data['_architecture'] = np.array(json.dumps(arch).encode('utf-8'))
     export_data['_charset'] = np.array(charset.encode('utf-8'))
 
@@ -55,15 +54,15 @@ def export_model(model_path: str, output_path: str):
     print(f"Exported to {output_path}")
 
     # Print summary
-    layer_names = sorted(set(k.replace('_weight', '').replace('_bias', '')
-                            for k in params.keys()))
+    layer_names = sorted({k.replace('_weight', '').replace('_bias', '')
+                            for k in params})
     for name in layer_names:
         w = params[f'{name}_weight']
         b = params[f'{name}_bias']
         print(f"  {name}: weight {w.shape}, bias {b.shape}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description='Export PyTorch model to NumPy format')
     parser.add_argument('--model', '-m', default='command_model_autoreg.pt',
                         help='Input PyTorch model checkpoint (.pt)')

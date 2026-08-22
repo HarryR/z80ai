@@ -6,6 +6,7 @@ CI environments to run without PyTorch installed.
 """
 
 import json
+
 import numpy as np
 
 
@@ -43,6 +44,7 @@ def _load_npz(model_path: str) -> tuple[dict, dict, str]:
 def _load_pt(model_path: str) -> tuple[dict, dict, str]:
     """Load from PyTorch checkpoint format."""
     import torch
+
     from feedme import AutoregressiveModel
 
     checkpoint = torch.load(model_path, weights_only=True)

@@ -36,7 +36,7 @@ def main():
             continue
         if '|' not in line:
             continue
-        q, a = line.rsplit('|', 1)
+        _query, a = line.rsplit('|', 1)
         by_answer[a.upper()].append(line)
 
     if not by_answer:
@@ -46,22 +46,18 @@ def main():
     # Determine target size
     counts = {k: len(v) for k, v in by_answer.items()}
     min_count = min(counts.values())
-    max_count = max(counts.values())
 
-    if args.target > 0:
-        target = args.target
-    else:
-        target = min_count
+    target = args.target if args.target > 0 else min_count
 
     if args.stats:
-        print(f"# Original distribution:", file=sys.stderr)
+        print("# Original distribution:", file=sys.stderr)
         for ans, cnt in sorted(counts.items(), key=lambda x: -x[1]):
             print(f"#   {ans}: {cnt:,}", file=sys.stderr)
         print(f"# Target per class: {target:,}", file=sys.stderr)
 
     # Balance
     balanced = []
-    for answer, lines in by_answer.items():
+    for lines in by_answer.values():
         if args.oversample:
             # Oversample: repeat minority classes
             if len(lines) < target:
@@ -71,10 +67,8 @@ def main():
                 sampled = random.sample(lines, target)
         else:
             # Undersample: take random subset of majority classes
-            if len(lines) > target:
-                sampled = random.sample(lines, target)
-            else:
-                sampled = lines  # Keep all if under target
+            # Keep all of a class that is already under target.
+            sampled = random.sample(lines, target) if len(lines) > target else lines
         balanced.extend(sampled)
 
     # Shuffle
@@ -85,7 +79,7 @@ def main():
         for line in balanced:
             a = line.rsplit('|', 1)[1].upper()
             final_counts[a] += 1
-        print(f"# Balanced distribution:", file=sys.stderr)
+        print("# Balanced distribution:", file=sys.stderr)
         for ans, cnt in sorted(final_counts.items(), key=lambda x: -x[1]):
             print(f"#   {ans}: {cnt:,}", file=sys.stderr)
         print(f"# Total: {len(balanced):,}", file=sys.stderr)

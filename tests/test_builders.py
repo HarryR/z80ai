@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 import buildfastz80com
 import buildz80com
 import buildz80tap
 import libinfer
-import pytest
 
 CPM_TPA_TOP = 0xE400  # where a stock CP/M 2.2 BDOS starts
 ZX_RAM_TOP = 0x10000  # one past the last byte of RAM on a 48K machine

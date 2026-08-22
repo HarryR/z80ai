@@ -27,16 +27,19 @@ from __future__ import annotations
 import argparse
 import os
 
+from libz80 import Z80Builder
+
 # A stock CP/M 2.2 puts the BDOS at E400h; leave a little room for the stack.
 CPM_TPA_TOP = 0xE400
 CPM_STACK_MARGIN = 0x0200
 
 
-def _fits_in_tpa(builder) -> bool:
+def _fits_in_tpa(builder: Z80Builder) -> bool:
     return builder.org + len(builder.build()) + CPM_STACK_MARGIN <= CPM_TPA_TOP
 
 
-def build_cpm(model: str, max_output_len: int, prefer: str = "auto"):
+def build_cpm(model: str, max_output_len: int,
+              prefer: str = "auto") -> tuple[Z80Builder, str]:
     """Build a CP/M .COM, choosing the fastest weight layout that fits."""
     import buildfastz80com
     import buildz80com
@@ -55,13 +58,13 @@ def build_cpm(model: str, max_output_len: int, prefer: str = "auto"):
     return buildz80com.build_autoreg(model, max_output_len=max_output_len), "packed"
 
 
-def build_zx(model: str, max_output_len: int):
+def build_zx(model: str, max_output_len: int) -> tuple[Z80Builder, str]:
     import buildz80tap
 
     return buildz80tap.build_autoreg(model, max_output_len=max_output_len), "packed"
 
 
-def build_ez80(model: str, max_output_len: int):
+def build_ez80(model: str, max_output_len: int) -> tuple[Z80Builder, str]:
     import buildez80
 
     return buildez80.build_autoreg(model, max_output_len=max_output_len), "bytes"

@@ -12,10 +12,10 @@ Usage:
     ./genpairs.py --vocab-file vocab.txt  # custom vocab
 """
 
-import json
 import argparse
-import sys
+import json
 import random
+import sys
 import urllib.request
 
 # Base vocabulary - model can combine 1-2 of these
@@ -55,7 +55,7 @@ SEED_INTENTS = [
     "inappropriately flirty",
     "dirty jokes",
     "flirting",
-    "being sexy",    
+    "being sexy",
     "greeting someone casually",
     "saying goodbye",
     "agreeing with something",
@@ -357,7 +357,7 @@ Reply in 1-5 words. Be enigmatic."""
             parsed = json.loads(response_text)
             # Try common keys
             for key in ["response", "reply", "r", "message", "text"]:
-                if key in parsed and parsed[key]:
+                if parsed.get(key):
                     return str(parsed[key]).strip()
             # Return first string value found
             for v in parsed.values():
@@ -553,10 +553,14 @@ Pick 1-2 short words as your reply."""
 
 def main():
     parser = argparse.ArgumentParser(description='Generate synthetic training pairs')
-    parser.add_argument('--seeds', '-s', type=int, default=0, help='Number of seed intents (0 = all)')
-    parser.add_argument('--variations', '-v', type=int, default=5, help='Variations per seed')
-    parser.add_argument('--vocab-file', '-V', type=str, help='File with allowed vocab (one per line)')
-    parser.add_argument('--seed-model', default='qwen3:1.7b', help='Model for generating variations')
+    parser.add_argument('--seeds', '-s', type=int, default=0,
+                        help='Number of seed intents (0 = all)')
+    parser.add_argument('--variations', '-v', type=int, default=5,
+                        help='Variations per seed')
+    parser.add_argument('--vocab-file', '-V', type=str,
+                        help='File with allowed vocab (one per line)')
+    parser.add_argument('--seed-model', default='qwen3:1.7b',
+                        help='Model for generating variations')
     parser.add_argument('--resp-model', default='gemma2:9b', help='Model for responses')
     parser.add_argument('--judge-model', default='qwen3:1.7b', help='Model for validating pairs')
     parser.add_argument('--no-validate', action='store_true', help='Skip validation step')
@@ -571,10 +575,14 @@ def main():
             vocab = [line.strip() for line in f if line.strip()]
 
     # Open output file (append mode) or use stdout
-    outfile = open(args.output, 'a') if args.output else sys.stdout
+    # Held open for the whole run and closed at the end; sys.stdout must not
+    # be closed, so this cannot simply become a with-block.
+    outfile = open(args.output, 'a') if args.output else sys.stdout  # noqa: SIM115
 
-    print(f"# Generating {args.seeds} seeds with {args.variations} variations each", file=sys.stderr)
-    print(f"# Variation model: {args.seed_model}, Response model: {args.resp_model}", file=sys.stderr)
+    print(f"# Generating {args.seeds} seeds with {args.variations} variations each",
+          file=sys.stderr)
+    print(f"# Variation model: {args.seed_model}, Response model: {args.resp_model}",
+          file=sys.stderr)
     print(f"# Vocab size: {len(vocab)} words", file=sys.stderr)
     if args.output:
         print(f"# Output file: {args.output}", file=sys.stderr)
@@ -614,10 +622,11 @@ def main():
                         continue
 
                     # Validate the pair
-                    if not args.no_validate:
-                        if not validate_pair(args.judge_model, var, response):
-                            print(f"#   REJECTED: {var}|{response}", file=sys.stderr)
-                            continue
+                    if not args.no_validate and not validate_pair(
+                        args.judge_model, var, response
+                    ):
+                        print(f"#   REJECTED: {var}|{response}", file=sys.stderr)
+                        continue
 
                     print(f"{var}|{response}", file=outfile)
                     outfile.flush()
@@ -625,7 +634,7 @@ def main():
                     total += 1
 
     except KeyboardInterrupt:
-        print(f"\n# Interrupted!", file=sys.stderr)
+        print("\n# Interrupted!", file=sys.stderr)
 
     if args.output:
         outfile.close()

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
 import buildfastz80com
 import buildz80com
 import buildz80tap
 import libinfer
-import numpy as np
-import pytest
 
 
 def test_layers_are_discovered_in_numeric_order():

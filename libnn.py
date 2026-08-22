@@ -779,7 +779,7 @@ def emit_weights(
     b: Z80Builder, packed_weights: list[bytes], biases: list
 ) -> None:
     """Emit the packed weight stream and 16-bit biases for every layer."""
-    for i, (weights, bias) in enumerate(zip(packed_weights, biases), start=1):
+    for i, (weights, bias) in enumerate(zip(packed_weights, biases, strict=True), start=1):
         b.label(f"WTS{i}")
         b.blob(weights)
         b.label(f"BIAS{i}")

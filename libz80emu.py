@@ -25,7 +25,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 # --- Flag bits ---------------------------------------------------------------
 
@@ -95,7 +95,7 @@ class Z80:
 
         # addr -> callback(cpu). Return True to suppress the instruction at that
         # address (the callback is responsible for PC, usually via a RET).
-        self.hooks: dict[int, Callable[["Z80"], bool | None]] = {}
+        self.hooks: dict[int, Callable[[Z80], bool | None]] = {}
         # Word size for the instruction currently being decoded (eZ80 suffixes
         # override this per instruction).
         self._wsz = 3 if adl else 2
@@ -211,7 +211,7 @@ class Z80:
 
     def _idx_addr(self, idx: str | None, disp: int) -> int:
         if idx is None:
-            return self.hl if not self.adl else self.hl
+            return self.hl
         base = self.ix if idx == "ix" else self.iy
         return (base + disp) & self.amask
 
@@ -771,10 +771,7 @@ class Z80:
             self.tstates += 3
         x, y, z = op >> 6, (op >> 3) & 7, op & 7
 
-        if idx is None:
-            src = self._get_r(z)
-        else:
-            src = self._rb(self._idx_addr(idx, disp))
+        src = self._get_r(z) if idx is None else self._rb(self._idx_addr(idx, disp))
 
         if x == 0:
             r = self._rot(y, src)

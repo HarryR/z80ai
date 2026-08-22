@@ -13,25 +13,24 @@ The context encodes the last few output characters using the same
 trigram hashing approach as the query.
 """
 
+
+from collections.abc import Iterable, Sequence
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from typing import List, Tuple
-from collections import Counter
 
 import libinfer
 from libqat import OverflowAwareLinear
-
 
 # Character set - built dynamically from training data
 # EOS is always last character
 EOS_CHAR = '\x00'
 
-def build_charset_from_pairs(pairs: List[Tuple[str, str]]) -> str:
+def build_charset_from_pairs(pairs: list[tuple[str, str]]) -> str:
     """Build minimal charset from loaded query-response pairs."""
     chars = set()
-    for query, response in pairs:
+    for _query, response in pairs:
         chars.update(response.upper())  # Normalize to uppercase
 
     # Sort for consistency: space first, then A-Z, then 0-9, then punctuation
@@ -78,7 +77,7 @@ class TrigramEncoder:
     the network's first layer absorbs.
     """
 
-    def __init__(self, num_buckets: int = 128):
+    def __init__(self, num_buckets: int = 128) -> None:
         self.num_buckets = num_buckets
 
     def encode(self, text: str) -> np.ndarray:
@@ -90,7 +89,7 @@ class TrigramEncoder:
 class ContextEncoder:
     """Encode recent output characters into hash buckets (integer-friendly)."""
 
-    def __init__(self, num_buckets: int = 128, context_len: int = 8):
+    def __init__(self, num_buckets: int = 128, context_len: int = 8) -> None:
         self.num_buckets = num_buckets
         self.context_len = context_len
 
@@ -102,7 +101,7 @@ class ContextEncoder:
 
 def create_training_examples(query: str, response: str,
                             query_encoder: TrigramEncoder,
-                            context_encoder: ContextEncoder) -> List[Tuple[np.ndarray, int]]:
+                            context_encoder: ContextEncoder) -> list[tuple[np.ndarray, int]]:
     """
     Create training examples from a (query, response) pair.
 
@@ -141,27 +140,31 @@ def create_training_examples(query: str, response: str,
 class AutoregressiveModel(nn.Module):
     """Autoregressive character model with configurable depth."""
 
-    def __init__(self, input_size: int = 256, hidden_sizes: list = [128, 128],
-                 num_chars: int = 64):
+    def __init__(self, input_size: int = 256,
+                 hidden_sizes: Sequence[int] | None = None,
+                 num_chars: int = 64) -> None:
         super().__init__()
 
+        if hidden_sizes is None:
+            hidden_sizes = [128, 128]
         self.input_size = input_size
-        self.hidden_sizes = hidden_sizes
+        self.hidden_sizes = list(hidden_sizes)
         self.num_chars = num_chars
 
         # Build layers dynamically
         self.layers = nn.ModuleList()
         prev_size = input_size
-        for i, hidden_size in enumerate(hidden_sizes):
+        for _i, hidden_size in enumerate(hidden_sizes):
             self.layers.append(OverflowAwareLinear(prev_size, hidden_size))
             prev_size = hidden_size
         self.layers.append(OverflowAwareLinear(prev_size, num_chars))
         self.relu = nn.ReLU()
 
-    def forward(self, x: torch.Tensor, use_int: bool = False, quant_temp: float = 1.0) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, use_int: bool = False,
+                quant_temp: float = 1.0) -> torch.Tensor:
         if use_int:
             return self._forward_int(x)
-        for i, layer in enumerate(self.layers[:-1]):
+        for _i, layer in enumerate(self.layers[:-1]):
             x = layer(x, quant_temp=quant_temp)
             x = self.relu(x)
         x = self.layers[-1](x, quant_temp=quant_temp)
@@ -201,7 +204,7 @@ class AutoregressiveModel(nn.Module):
         return {f'layer{i+1}': layer.get_overflow_risk()
                 for i, layer in enumerate(self.layers)}
 
-    def reset_overflow_stats(self):
+    def reset_overflow_stats(self) -> None:
         for layer in self.layers:
             layer.reset_overflow_stats()
 
@@ -210,7 +213,7 @@ class AutoregressiveModel(nn.Module):
 
     def compute_total_overflow_penalty(self, x: torch.Tensor) -> torch.Tensor:
         penalty = torch.tensor(0.0, device=x.device)
-        for i, layer in enumerate(self.layers[:-1]):
+        for _i, layer in enumerate(self.layers[:-1]):
             penalty = penalty + layer.compute_overflow_penalty(x)
             x = self.relu(layer(x))
         penalty = penalty + self.layers[-1].compute_overflow_penalty(x)
@@ -268,7 +271,7 @@ def generate_response(model: AutoregressiveModel, query: str,
 
 
 
-def parse_pair(line: str) -> Tuple[str, str] | None:
+def parse_pair(line: str) -> tuple[str, str] | None:
     """Parse a single line into (query, response) or None if invalid."""
     line = line.strip()
     if '|' not in line:
@@ -292,7 +295,8 @@ def parse_pair(line: str) -> Tuple[str, str] | None:
     return None
 
 
-def load_chunk(stdin, chunk_size: int = 0) -> List[Tuple[str, str]]:
+def load_chunk(stdin: Iterable[str],
+               chunk_size: int = 0) -> list[tuple[str, str]]:
     """Load up to chunk_size pairs from stdin (0 = all)."""
     pairs = []
     for line in stdin:
@@ -304,13 +308,15 @@ def load_chunk(stdin, chunk_size: int = 0) -> List[Tuple[str, str]]:
     return pairs
 
 
-def validate_charset(pairs: List[Tuple[str, str]], charset: str) -> None:
+def validate_charset(pairs: list[tuple[str, str]], charset: str) -> None:
     """Error if pairs contain characters not in charset."""
     allowed = set(charset)
-    for query, response in pairs:
+    for _query, response in pairs:
         for c in response:
             if c not in allowed:
-                raise ValueError(f"Character '{c}' (ord {ord(c)}) in response '{response}' not in charset. "
+                raise ValueError(
+                    f"Character '{c}' (ord {ord(c)}) in response "
+                    f"'{response}' not in charset. "
                                f"Charset was built from first chunk and cannot change.")
 
 
@@ -339,7 +345,6 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
     """Train incrementally on chunks of data from stdin."""
     global CHARSET, CHAR_TO_IDX, IDX_TO_CHAR, EOS_IDX, NUM_CHARS
     import sys
-    import time
 
     print("=" * 60)
     print("Loading training data...")
@@ -364,10 +369,10 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
     # Build charset from ALL pairs (ensures consistency)
     CHARSET = build_charset_from_pairs(all_pairs)
     CHAR_TO_IDX = {c: i for i, c in enumerate(CHARSET)}
-    IDX_TO_CHAR = {i: c for i, c in enumerate(CHARSET)}
+    IDX_TO_CHAR = dict(enumerate(CHARSET))
     EOS_IDX = len(CHARSET) - 1
     NUM_CHARS = len(CHARSET)
-    print(f"Charset ({NUM_CHARS} chars): {repr(CHARSET[:-1])} + EOS")
+    print(f"Charset ({NUM_CHARS} chars): {CHARSET[:-1]!r} + EOS")
 
     query_encoder = TrigramEncoder(num_buckets=128)
     context_encoder = ContextEncoder(num_buckets=128, context_len=8)
@@ -385,12 +390,15 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
         checkpoint = torch.load(checkpoint_file, weights_only=False)
         arch = checkpoint.get('architecture', {})
         if arch.get('num_classes') == NUM_CHARS and arch.get('hidden_sizes') == hidden_sizes:
-            model = AutoregressiveModel(input_size=256, hidden_sizes=hidden_sizes, num_chars=NUM_CHARS)
+            model = AutoregressiveModel(input_size=256,
+                                        hidden_sizes=hidden_sizes,
+                                        num_chars=NUM_CHARS)
             model.load_state_dict(checkpoint['model_state'])
             total_epochs = checkpoint.get('total_epochs', 0)
             best_int_acc = checkpoint.get('best_int_acc', 0.0)
             best_epoch = checkpoint.get('best_epoch', 0)
-            print(f"Resumed from checkpoint: {total_epochs} epochs, best IntAcc: {best_int_acc:.1%}")
+            print(f"Resumed from checkpoint: {total_epochs} epochs, "
+                  f"best IntAcc: {best_int_acc:.1%}")
         else:
             print("Architecture changed, starting fresh")
     except FileNotFoundError:
@@ -463,9 +471,11 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
                         else:
                             marker = ""
 
-                        print(f"  Epoch {current_epoch}: CE={ce_loss.item():.4f}, Acc={acc:.1%}, IntAcc={int_acc:.1%}{marker}")
+                        print(f"  Epoch {current_epoch}: "
+                              f"CE={ce_loss.item():.4f}, Acc={acc:.1%}, "
+                              f"IntAcc={int_acc:.1%}{marker}")
 
-            except KeyboardInterrupt:
+            except KeyboardInterrupt:  # noqa: PERF203 - Ctrl+C must save the run
                 print("\nInterrupted!")
                 interrupted = True
                 break
@@ -492,7 +502,8 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
             'best_int_acc': best_int_acc,
             'best_epoch': best_epoch,
         }, checkpoint_file)
-        print(f"Saved {save_note} (epochs: {total_epochs}, best: {best_int_acc:.1%} @ {best_epoch})")
+        print(f"Saved {save_note} (epochs: {total_epochs}, "
+              f"best: {best_int_acc:.1%} @ {best_epoch})")
 
         if interrupted:
             break
@@ -510,10 +521,14 @@ if __name__ == '__main__':
     import sys
 
     parser = argparse.ArgumentParser(description='Train autoregressive model')
-    parser.add_argument('--epochs', '-e', type=int, default=100, help='Epochs to train (per chunk if chunked)')
-    parser.add_argument('--file', '-f', type=str, default=None, help='Training data file (default: stdin)')
-    parser.add_argument('--chunk', '-c', type=int, default=0, help='Chunk size for streaming (0 = load all as one chunk)')
-    parser.add_argument('--save-best', action='store_true', help='Save best model instead of latest')
+    parser.add_argument('--epochs', '-e', type=int, default=100,
+                        help='Epochs to train (per chunk if chunked)')
+    parser.add_argument('--file', '-f', type=str, default=None,
+                        help='Training data file (default: stdin)')
+    parser.add_argument('--chunk', '-c', type=int, default=0,
+                        help='Chunk size for streaming (0 = one chunk)')
+    parser.add_argument('--save-best', action='store_true',
+                        help='Save best model instead of latest')
     parser.add_argument('--hidden-sizes', type=str, default='256,192,128',
                         help='Comma-separated hidden layer sizes (e.g. 128,96,64)')
     parser.add_argument('--output', '-o', type=str, default='command_model_autoreg.pt',
@@ -552,7 +567,8 @@ if __name__ == '__main__':
                     continue
                 if query == '!':
                     break
-                response = generate_response(model, query, query_encoder, context_encoder, max_len=50)
+                response = generate_response(model, query, query_encoder,
+                                             context_encoder, max_len=50)
                 print(response)
             except (EOFError, KeyboardInterrupt):
                 break

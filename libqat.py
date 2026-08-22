@@ -10,12 +10,11 @@ Trains neural networks that are aware of:
 The model learns to avoid overflow naturally during training.
 """
 
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from typing import List
-
 
 # Z80 constraints
 MAX_ACCUM = 32767      # 16-bit signed max
@@ -27,16 +26,17 @@ class StraightThroughEstimator(torch.autograd.Function):
     """Straight-through estimator for non-differentiable ops."""
 
     @staticmethod
-    def forward(ctx, x, x_quantized):
+    def forward(ctx, x: torch.Tensor, x_quantized: torch.Tensor) -> torch.Tensor:
         return x_quantized
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
         # Pass gradient straight through
         return grad_output, None
 
 
-def quantize_weights_2bit(w: torch.Tensor, hard: bool = True, temperature: float = 1.0) -> torch.Tensor:
+def quantize_weights_2bit(w: torch.Tensor, hard: bool = True,
+                          temperature: float = 1.0) -> torch.Tensor:
     """Quantize weights to 2-bit: {-2, -1, 0, +1} (4 values for 2 bits)
 
     Args:
@@ -105,14 +105,17 @@ class OverflowAwareLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int,
                  simulate_overflow: bool = True,
-                 overflow_penalty: float = 0.0):
+                 overflow_penalty: float = 0.0) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.simulate_overflow = simulate_overflow
 
         # Xavier initialization
-        self.weight = nn.Parameter(torch.randn(out_features, in_features) * np.sqrt(2.0 / (in_features + out_features)))
+        self.weight = nn.Parameter(
+            torch.randn(out_features, in_features)
+            * np.sqrt(2.0 / (in_features + out_features))
+        )
         self.bias = nn.Parameter(torch.zeros(out_features))
 
         # Track overflow risk
@@ -156,7 +159,7 @@ class OverflowAwareLinear(nn.Module):
 
         return overflow.mean()
 
-    def reset_overflow_stats(self):
+    def reset_overflow_stats(self) -> None:
         self.max_accum_seen.zero_()
 
 
@@ -167,8 +170,8 @@ class QATCommandClassifier(nn.Module):
     Uses OverflowAwareLinear layers to simulate Z80 constraints during training.
     """
 
-    def __init__(self, input_size: int, hidden_sizes: List[int], num_classes: int,
-                 simulate_overflow: bool = True):
+    def __init__(self, input_size: int, hidden_sizes: list[int], num_classes: int,
+                 simulate_overflow: bool = True) -> None:
         super().__init__()
 
         self.input_size = input_size
@@ -220,7 +223,7 @@ class QATCommandClassifier(nn.Module):
                 loss = loss + module.get_quantization_loss()
         return loss
 
-    def reset_overflow_stats(self):
+    def reset_overflow_stats(self) -> None:
         for module in self.network:
             if isinstance(module, OverflowAwareLinear):
                 module.reset_overflow_stats()
@@ -239,11 +242,9 @@ class QATCommandClassifier(nn.Module):
                     w = module.weight
                     # Quantize weights
                     w_scale = torch.quantile(w.abs().flatten(), 0.95)
-                    if w_scale > 0:
-                        w_scaled = w / w_scale
-                    else:
-                        w_scaled = w
-                    w_quant = torch.clamp(torch.round(w_scaled), -2, 1).cpu().numpy().astype(np.int8)
+                    w_scaled = w / w_scale if w_scale > 0 else w
+                    w_quant = (torch.clamp(torch.round(w_scaled), -2, 1)
+                               .cpu().numpy().astype(np.int8))
 
                     # Quantize biases (scaled by 32)
                     b = module.bias
@@ -259,7 +260,7 @@ def train_qat_model(model: QATCommandClassifier,
                     X: torch.Tensor, y: torch.Tensor,
                     epochs: int = 500, lr: float = 0.01,
                     quant_loss_weight: float = 0.01,
-                    overflow_penalty: float = 0.0001) -> List[float]:
+                    overflow_penalty: float = 0.0001) -> list[float]:
     """
     Train with QAT-style regularization (not hard quantization).
 
@@ -306,7 +307,9 @@ def train_qat_model(model: QATCommandClassifier,
                 acc = (preds == y).float().mean()
                 overflow_stats = model.get_overflow_stats()
                 max_risk = max(overflow_stats.values()) if overflow_stats else 0
-                print(f"Epoch {epoch+1:3d}: CE={ce_loss.item():.4f}, Acc={acc:.1%}, QuantLoss={quant_loss.item():.3f}, OverflowRisk={max_risk:.2f}x")
+                print(f"Epoch {epoch+1:3d}: CE={ce_loss.item():.4f}, "
+                      f"Acc={acc:.1%}, QuantLoss={quant_loss.item():.3f}, "
+                      f"OverflowRisk={max_risk:.2f}x")
 
     return losses
 
@@ -317,8 +320,9 @@ def train_qat_model(model: QATCommandClassifier,
 
 if __name__ == '__main__':
     import json
+
+    from poc_inference import export_model_to_binary, integer_inference
     from train_commands import SimpleTokenizer
-    from poc_inference import integer_inference, export_model_to_binary
 
     print("=" * 60)
     print("QAT Training with Overflow-Aware Regularization")
@@ -331,7 +335,7 @@ if __name__ == '__main__':
             obj = json.loads(line)
             examples.append((obj['text'], obj['command']))
 
-    commands = sorted(set(ex[1] for ex in examples))
+    commands = sorted({ex[1] for ex in examples})
     command_to_idx = {cmd: i for i, cmd in enumerate(commands)}
     idx_to_command = {i: cmd for cmd, i in command_to_idx.items()}
 

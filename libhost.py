@@ -14,6 +14,8 @@ silently reading zeroes.
 
 from __future__ import annotations
 
+import contextlib
+
 from libz80emu import Z80, Z80Error
 
 # --- CP/M --------------------------------------------------------------------
@@ -122,10 +124,9 @@ class CPMHost:
     def run(self, image: bytes, max_cycles: int = 2_000_000_000) -> str:
         self.cpu.load(TPA, image)
         self.cpu.pc = TPA
-        try:
+        # CPMExit unwinds out of the BDOS hook when input runs out.
+        with contextlib.suppress(CPMExit):
             self.cpu.run(max_cycles=max_cycles)
-        except CPMExit:
-            pass
         return "".join(self.output)
 
 

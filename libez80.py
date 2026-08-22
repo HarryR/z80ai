@@ -25,7 +25,7 @@ class EZ80Builder(Z80Builder):
 
     addr_size = 3
 
-    def __init__(self, org: int = AGON_LOAD_ADDR):
+    def __init__(self, org: int = AGON_LOAD_ADDR) -> None:
         super().__init__(org=org)
 
     # --- 24-bit data ---------------------------------------------------------

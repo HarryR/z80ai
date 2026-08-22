@@ -8,6 +8,7 @@ by the ``slow``-marked tests.
 
 from __future__ import annotations
 
+import itertools
 import os
 import sys
 
@@ -16,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from libinfer import Model  # noqa: E402
+from libinfer import Model
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXAMPLES = os.path.join(REPO, "examples")
@@ -33,9 +34,9 @@ def make_model(
 ) -> Model:
     """Build a random but deterministic quantized model."""
     rng = np.random.default_rng(seed)
-    sizes = list(layer_sizes) + [len(charset)]
+    sizes = [*list(layer_sizes), len(charset)]
     weights, biases = [], []
-    for nin, nout in zip(sizes, sizes[1:]):
+    for nin, nout in itertools.pairwise(sizes):
         weights.append(
             rng.choice(_WEIGHT_VALUES, size=(nout, nin), p=_WEIGHT_PROBS).astype(np.int32)
         )
