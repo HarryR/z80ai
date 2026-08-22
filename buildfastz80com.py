@@ -49,14 +49,29 @@ fastest version that fits.
 """
 
 import numpy as np
+
+import libnn
+from buildz80com import BDOS, BDOS_CONSOLE_OUT, BDOS_PRINT_STRING, BDOS_READ_LINE
+from buildz80com import CPM_CMDLINE, CPMPlatform
 from libinfer import discover_layers, validate_z80_layers
 from libz80 import Z80Builder
 from loadmodel import load_model_params
 
-# Z80 Constants
-BDOS = 0x0005
-CPM_CMDLINE = 0x0080
-MAX_OUTPUT_LEN = 50  # Maximum characters to generate
+#: Maximum characters to generate before giving up on ever seeing an EOS.
+MAX_OUTPUT_LEN = 50
+#: Size of the chat-mode input line (BDOS function 10 buffer).
+CHAT_BUFFER_SIZE = 62
+
+
+class FastCPMPlatform(CPMPlatform):
+    """Same I/O as the packed CP/M build; the weights are laid out differently.
+
+    Activations still start in INBUF in the ordinary interleaved form; INFER
+    copies them into the split high/low buffers its inner loop indexes.
+    """
+
+    name = "CP/M (index lists)"
+    weight_layout = "index"
 
 
 def pack_weights_and_biases(weights: np.ndarray, biases: np.ndarray) -> bytes:
@@ -121,6 +136,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     for name in layer_names:
         weights_biases.append(pack_weights_and_biases(params[f'{name}_weight'], params[f'{name}_bias']))
 
+    plat = FastCPMPlatform()
     b = Z80Builder()
 
     # === MAIN ===
@@ -241,204 +257,12 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.jr_nz('GENLOOP')
     b.ret()
 
-    # === PRINTCH: Print character from RESULT ===
-    b.label('PRINTCH')
-    b.ld_a_mem_label('RESULT')
-    # Look up in character table
-    b.ld_hl_label('CHARTBL')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ld_a_hl()
-    b.ld_e_a()
-    b.ld_c_n(2)  # BDOS console output
-    b.call_addr(BDOS)
-    b.ret()
-
-    # === UPDATE_CTX: Update context encoding with new character ===
-    # Context uses n-gram hashing with position info
-    # We shift the context buffer and add new character contribution
-    b.label('UPDATE_CTX')
-    # Shift context characters left
-    b.ld_hl_label('CTXCHARS')
-    b.inc_hl()  # Point to char 1
-    b.ld_de_label('CTXCHARS')  # Point to char 0
-    b.ld_bc_nn(7)  # Copy 7 bytes
-    b.ldir()
-
-    # Store new character at end
-    b.ld_a_mem_label('RESULT')
-    b.ld_hl_label('CHARTBL')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ld_a_hl()
-    # Convert to lowercase for hashing
-    b.cp_n(ord('A'))
-    b.jr_c('UPD_STORE')
-    b.cp_n(ord('Z') + 1)
-    b.jr_nc('UPD_STORE')
-    b.add_a_n(0x20)
-    b.label('UPD_STORE')
-    b.ld_hl_label('CTXCHARS')
-    b.ld_de_nn(7)
-    b.add_hl_de()
-    b.ld_hl_a()
-
-    # Re-encode context into buckets
-    b.call('ENCODE_CTX')
-    b.ret()
-
-    # === ENCODE_CTX: Encode CTXCHARS into context buckets (INBUF+256) ===
-    b.label('ENCODE_CTX')
-    # Clear context buckets (last 128 of INBUF)
-    b.ld_hl_label('INBUF')
-    b.ld_de_nn(256)  # 128 buckets * 2 bytes
-    b.add_hl_de()
-    b.ld_d_h()
-    b.ld_e_l()
-    b.inc_de()
-    b.xor_a()
-    b.ld_hl_a()
-    b.ld_bc_nn(255)  # 128*2 - 1
-    b.ldir()
-
-    # Hash n-grams (1,2,3-grams with position)
-    b.ld_a_n(0)
-    b.ld_mem_label_a('CTXPOS')
-
-    # For each n-gram length
-    b.ld_a_n(1)
-    b.ld_mem_label_a('CTXN')
-
-    b.label('CTX_NLOOP')
-    # For each position
-    b.xor_a()
-    b.ld_mem_label_a('CTXPOS')
-
-    b.label('CTX_PLOOP')
-    # Check if we have enough chars for this n-gram
-    # max_pos = 8 - n + 1, if pos >= max_pos then done with this n
-    b.ld_a_n(9)  # 8 + 1
-    b.ld_hl_label('CTXN')
-    b.sub_hl_ind()  # A = 9 - (CTXN) = max_pos
-    b.ld_b_a()
-    b.ld_a_mem_label('CTXPOS')
-    b.cp_b()
-    b.jr_nc('CTX_NEXT_N')
-
-    # Hash this n-gram
-    b.call('CTX_HASH')
-
-    # Next position
-    b.ld_a_mem_label('CTXPOS')
-    b.inc_a()
-    b.ld_mem_label_a('CTXPOS')
-    b.jr('CTX_PLOOP')
-
-    b.label('CTX_NEXT_N')
-    b.ld_a_mem_label('CTXN')
-    b.inc_a()
-    b.ld_mem_label_a('CTXN')
-    b.cp_n(4)  # n = 1,2,3
-    b.jr_c('CTX_NLOOP')
-    b.ret()
-
-    # === CTX_HASH: Hash n-gram at position CTXPOS with length CTXN ===
-    b.label('CTX_HASH')
-    # hash = pos * 7
-    b.ld_a_mem_label('CTXPOS')
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.add_hl_hl()  # *2
-    b.add_hl_hl()  # *4
-    b.add_hl_hl()  # *8
-    b.ld_d_h()
-    b.ld_e_l()
-    b.ld_a_mem_label('CTXPOS')
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.ex_de_hl()
-    b.or_a()
-    b.sbc_hl_de()  # *7
-    b.push_hl()  # Save hash
-
-    # Get pointer to chars
-    b.ld_hl_label('CTXCHARS')
-    b.ld_a_mem_label('CTXPOS')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ex_de_hl()  # DE = char pointer
-
-    b.pop_hl()  # Restore hash
-
-    # For each char in n-gram
-    b.ld_a_mem_label('CTXN')
-    b.ld_b_a()
-
-    b.label('CTX_HLOOP')
-    b.push_bc()
-    # hash = hash * 31 + char
-    b.push_hl()
-    b.add_hl_hl()  # *2
-    b.add_hl_hl()  # *4
-    b.add_hl_hl()  # *8
-    b.add_hl_hl()  # *16
-    b.add_hl_hl()  # *32
-    b.pop_bc()
-    b.or_a()
-    b.sbc_hl_bc()  # *31
-    b.ld_a_de()
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()  # + char
-    b.inc_de()
-    b.pop_bc()
-    b.djnz('CTX_HLOOP')
-
-    # bucket = (hash & 127) + 128
-    b.ld_a_l()
-    b.and_n(127)
-
-    # Add to bucket (context is at INBUF + 256)
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.add_hl_hl()  # *2 for word offset
-    b.ld_de_label('INBUF')
-    b.push_hl()
-    b.ld_hl_nn(256)
-    b.add_hl_de()
-    b.ex_de_hl()
-    b.pop_hl()
-    b.add_hl_de()
-
-    # Increment bucket value by 32
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.push_hl()
-    b.ld_hl_nn(32)
-    b.add_hl_de()
-    b.ex_de_hl()
-    b.pop_hl()
-    b.ld_hl_d()
-    b.dec_hl()
-    b.ld_hl_e()
-    b.ret()
-
-    # === CLEAR_CTX: Initialize context with spaces ===
-    b.label('CLEAR_CTX')
-    # Set CTXCHARS to 8 spaces
-    b.ld_hl_label('CTXCHARS')
-    b.ld_b_n(8)
-    b.label('CLR_LP')
-    b.ld_hl_n(ord(' '))
-    b.inc_hl()
-    b.djnz('CLR_LP')
-
-    # Encode the initial spaces into context buckets
-    b.jp('ENCODE_CTX')  # This will return for us
+    # === Shared engine: printing, context encoding, tokenizing ===
+    libnn.emit_printch(b, plat)
+    libnn.emit_update_ctx(b, plat)
+    libnn.emit_encode_ctx(b, plat)
+    libnn.emit_ctx_hash(b, plat)
+    libnn.emit_clear_ctx(b, plat, unrolled=False)
 
     # === Inference Evaluation ===
     # HL points to NETWORK:
@@ -649,178 +473,24 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.ld_mem_label_a('RESULT')
     b.ret()
 
-    # === TOKENIZE (query into first 128 buckets) ===
-    b.label('TOKENIZE')
-    # Clear first 128 buckets of INBUF
-    b.ld_hl_label('INBUF')
-    b.ld_de_label('INBUF')
-    b.inc_de()
-    b.ld_bc_nn(255)  # 128 * 2 - 1
-    b.ld_a_n(0)
-    b.ld_hl_a()
-    b.ldir()
-
-    # Get length
-    b.ld_hl_nn(CPM_CMDLINE)
-    b.ld_a_hl()
-    b.or_a()
-    b.jp_z('TOK_DONE')
-    b.ld_mem_label_a('TOKLEN')
-
-    b.ld_de_nn(CPM_CMDLINE + 1)
-
-    # Skip leading spaces
-    b.label('TOK_SKIP_SPACE')
-    b.ld_a_mem_label('TOKLEN')
-    b.or_a()
-    b.jp_z('TOK_DONE')
-    b.ld_a_de()
-    b.cp_n(ord(' '))
-    b.jr_nz('TOK_START')
-    b.inc_de()
-    b.ld_a_mem_label('TOKLEN')
-    b.dec_a()
-    b.ld_mem_label_a('TOKLEN')
-    b.jr('TOK_SKIP_SPACE')
-
-    b.label('TOK_START')
-    b.ld_a_n(ord(' '))
-    b.ld_mem_label_a('TOKC1')
-    b.ld_a_de()
-    b.cp_n(ord('A'))
-    b.jr_c('TOK_FIRST_LOW')
-    b.cp_n(ord('Z') + 1)
-    b.jr_nc('TOK_FIRST_LOW')
-    b.add_a_n(0x20)
-    b.label('TOK_FIRST_LOW')
-    b.ld_mem_label_a('TOKC2')
-    b.inc_de()
-    b.ld_a_mem_label('TOKLEN')
-    b.dec_a()
-    b.ld_mem_label_a('TOKLEN')
-
-    b.label('TOK_LOOP')
-    b.ld_a_mem_label('TOKLEN')
-    b.or_a()
-    b.jr_z('TOK_TRAIL')
-    b.ld_a_de()
-    b.cp_n(ord('A'))
-    b.jr_c('TOK_LOW1')
-    b.cp_n(ord('Z') + 1)
-    b.jr_nc('TOK_LOW1')
-    b.add_a_n(0x20)
-    b.label('TOK_LOW1')
-    b.ld_mem_label_a('TOKC3')
-    b.call('TOK_HASH')
-    b.ld_a_mem_label('TOKC2')
-    b.ld_mem_label_a('TOKC1')
-    b.ld_a_mem_label('TOKC3')
-    b.ld_mem_label_a('TOKC2')
-    b.inc_de()
-    b.ld_a_mem_label('TOKLEN')
-    b.dec_a()
-    b.ld_mem_label_a('TOKLEN')
-    b.jr('TOK_LOOP')
-
-    b.label('TOK_TRAIL')
-    b.ld_a_n(ord(' '))
-    b.ld_mem_label_a('TOKC3')
-    b.call('TOK_HASH')
-    b.jr('TOK_DONE')
-
-    # === TOK_HASH ===
-    b.label('TOK_HASH')
-    b.push_de()
-    b.ld_a_mem_label('TOKC1')
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.push_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.pop_de()
-    b.or_a()
-    b.sbc_hl_de()
-    b.ld_a_mem_label('TOKC2')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.push_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.pop_de()
-    b.or_a()
-    b.sbc_hl_de()
-    b.ld_a_mem_label('TOKC3')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-
-    # bucket = L & 127 (first 128 buckets only)
-    b.ld_a_l()
-    b.and_n(127)
-
-    # INBUF[bucket] += 32
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.add_hl_hl()
-    b.push_de()
-    b.ld_de_label('INBUF')
-    b.add_hl_de()
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.ld_bc_nn(32)
-    b.ex_de_hl()
-    b.add_hl_bc()
-    b.ex_de_hl()
-    b.ld_a_d()
-    b.ld_hl_a()
-    b.dec_hl()
-    b.ld_a_e()
-    b.ld_hl_a()
-    b.pop_de()
-    b.pop_de()
-    b.ret()
-
-    b.label('TOK_DONE')
-    b.ret()
+    libnn.emit_tokenizer(b, plat)
+    libnn.emit_tok_hash(b, plat)
 
     # === DATA ===
     # Character table (dynamic size based on charset)
-    b.label('CHARTBL')
-    for c in charset:
-        if c == '\x00':
-            b.db(0)  # EOS
-        else:
-            b.db(ord(c))
+    libnn.emit_charset_table(b, charset)
 
     b.label('CRLF')
     b.db(13, 10, ord('$'))
 
-    # Variables
+    # INFER parks the stack pointer here while it walks the weights with POP.
     b.label('SPSAV'); b.dw(0)
-    b.label('MAXV'); b.dw(0)
-    b.label('MAXI'); b.db(0)
-    b.label('RESULT'); b.db(0)
-    b.label('GENCNT'); b.db(0)
-    b.label('TOKLEN'); b.db(0)
-    b.label('TOKC1'); b.db(0)
-    b.label('TOKC2'); b.db(0)
-    b.label('TOKC3'); b.db(0)
-    b.label('CTXPOS'); b.db(0)
-    b.label('CTXN'); b.db(0)
-    b.label('CTXCHARS'); b.ds(8)  # Last 8 output characters
+    libnn.emit_engine_variables(b)
 
     # Chat mode buffer (BDOS function 10 format)
-    b.label('CHATBUF'); b.db(62)  # Max chars (buffer size - 2)
-    b.label('CHATLEN'); b.db(0)   # Actual chars read (filled by BDOS)
-    b.label('CHATDAT'); b.ds(62)  # Input text buffer
+    b.label('CHATBUF'); b.db(CHAT_BUFFER_SIZE)  # capacity, read by BDOS
+    b.label('CHATLEN'); b.db(0)                 # length, written by BDOS
+    b.label('CHATDAT'); b.ds(CHAT_BUFFER_SIZE)
 
     b.label('NETWORK')
     b.db(num_layers)

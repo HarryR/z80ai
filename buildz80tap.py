@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
 """
-Build Z80 Autoregressive Character Generation for ZX Spectrum 48
+Build a ZX Spectrum 48K .TAP for character-by-character text generation.
 
-This generates Z80 machine code for ZX Spectrum 48:
-1. Tokenize query into first 128 buckets (trigram hashing)
-2. Initialize context (next 128 buckets) to zero
-3. Loop:
-   a. Run neural network inference (256 inputs → 64 character outputs)
-   b. Argmax to find best character
-   c. If EOS (index 63), stop
-   d. Print the character via ZX Spectrum ROM
-   e. Update context encoding with new character
-   f. Repeat until EOS or max length
+The engine is shared with the CP/M build (see :mod:`libnn`); what differs is
+I/O — characters go out through the ROM print routine and input comes from a
+keyboard loop rather than BDOS — and the load address.
+
+RAM ends at FFFFh, so the load address bounds how large a model can be. See
+``ORG_ADDR`` below and ZX-SPECTRUM.md.
 """
 
+from __future__ import annotations
+
+import argparse
+
 import numpy as np
+
+import libnn
 from libinfer import discover_layers, pack_2bit, validate_z80_layers
 from libz80 import Z80Builder
 from loadmodel import load_model_params
 
-# ZX Spectrum Constants
-ZX_PRINT_A = 0x0010  # RST 10h - print character in A
-ZX_CLS = 0x0DAF      # CLS routine
-ZX_CHAN_OPEN = 0x1601 # Open channel
-ZX_INPUT_LINE = 0x0F2C # Input line routine
-MAX_OUTPUT_LEN = 50   # Maximum characters to generate
+# ZX Spectrum ROM entry points.
+ZX_PRINT_A = 0x0010  # RST 10h - print the character in A
+ZX_CLS = 0x0DAF  # clear screen
+ZX_CHAN_OPEN = 0x1601  # open a stream channel
+ZX_KEY_INPUT = 0x10A8  # wait for a key, return it in A
+
+#: Maximum characters to generate before giving up on ever seeing an EOS.
+MAX_OUTPUT_LEN = 50
+#: Longest query the input line will accept.
+MAX_INPUT_LEN = 62
 
 # Memory layout for ZX Spectrum 48K.
 #
@@ -37,558 +43,203 @@ MAX_OUTPUT_LEN = 50   # Maximum characters to generate
 ORG_ADDR = 0x6000
 ZX_RAM_TOP = 0x10000  # one past the last byte of RAM on a 48K machine
 
+# ZX character codes.
+ZX_ENTER = 13
+ZX_DELETE = 12
+ZX_BACKSPACE = 8
+ZX_SPACE = 32
+
+
+class ZXPlatform(libnn.Platform):
+    """ZX Spectrum: characters go through RST 10h, input via a keyboard loop."""
+
+    name = "ZX Spectrum"
+    buffer = "TOKBUF"
+    weight_layout = "plain"
+
+    def print_char(self, b: Z80Builder) -> None:
+        b.rst(ZX_PRINT_A)
+
+    def load_query_length(self, b: Z80Builder) -> None:
+        b.ld_a_mem_label("INPLEN")
+
+    def load_query_pointer(self, b: Z80Builder) -> None:
+        b.ld_de_label("INPBUF")
+
 
 def pack_2bit_weights(weights: np.ndarray) -> bytes:
     """Pack 2-bit weights, four per byte, one output neuron per whole bytes."""
-    return pack_2bit(weights, layout='plain')
+    return pack_2bit(weights, layout="plain")
 
 
 def build_tap_header(filename: str, start: int, length: int) -> bytes:
-    """Build ZX Spectrum TAP header block"""
-    # TAP format: [length_lo, length_hi, flag, ...data..., checksum]
-    # Header is 19 bytes (including flag byte)
+    """Build a TAP header block describing a CODE file.
+
+    A TAP block is ``[length:2][flag:1][payload][checksum:1]``; the checksum is
+    the XOR of the flag and payload bytes.
+    """
     header = bytearray()
-
-    # File type: 3 = CODE
-    header.append(3)
-
-    # Filename (10 bytes, padded with spaces)
-    fname = filename[:10].ljust(10).encode('ascii')
-    header.extend(fname)
-
-    # Data length (2 bytes, little-endian)
+    header.append(3)  # file type 3 = CODE
+    header.extend(filename[:10].ljust(10).encode("ascii"))
     header.append(length & 0xFF)
     header.append((length >> 8) & 0xFF)
-
-    # Start address (2 bytes, little-endian)
     header.append(start & 0xFF)
     header.append((start >> 8) & 0xFF)
+    header.extend((0, 0))  # unused for CODE
 
-    # Unused (2 bytes)
-    header.append(0)
-    header.append(0)
-
-    # Calculate checksum
     checksum = 0
-    for b in header:
-        checksum ^= b
+    for byte in header:
+        checksum ^= byte  # the 00h flag byte XORs to nothing
 
-    # Build TAP block: length (2 bytes) + flag (0x00 for header) + data + checksum
-    tap_block = bytearray()
-    tap_block.append(19 & 0xFF)  # Length lo
-    tap_block.append(0)           # Length hi
-    tap_block.append(0x00)        # Flag: header block
-    tap_block.extend(header)
-    tap_block.append(checksum)
-
-    return bytes(tap_block)
+    block = bytearray()
+    block.append(19)  # flag + 17 header bytes + checksum
+    block.append(0)
+    block.append(0x00)  # header block
+    block.extend(header)
+    block.append(checksum)
+    return bytes(block)
 
 
 def build_tap_data(data: bytes) -> bytes:
-    """Build ZX Spectrum TAP data block"""
-    # Calculate checksum
-    checksum = 0xFF  # Data block flag
-    for b in data:
-        checksum ^= b
+    """Build a TAP data block wrapping ``data``."""
+    checksum = 0xFF  # seeded with the data block flag
+    for byte in data:
+        checksum ^= byte
 
-    # Build TAP block
-    tap_block = bytearray()
-    length = len(data) + 2  # +2 for flag and checksum
-    tap_block.append(length & 0xFF)
-    tap_block.append((length >> 8) & 0xFF)
-    tap_block.append(0xFF)  # Flag: data block
-    tap_block.extend(data)
-    tap_block.append(checksum)
-
-    return bytes(tap_block)
+    length = len(data) + 2  # flag + checksum
+    block = bytearray()
+    block.append(length & 0xFF)
+    block.append((length >> 8) & 0xFF)
+    block.append(0xFF)  # data block
+    block.extend(data)
+    block.append(checksum)
+    return bytes(block)
 
 
-def build_autoreg(model_path: str = 'command_model_autoreg.pt',
-                  max_output_len: int = MAX_OUTPUT_LEN,
-                  org: int = ORG_ADDR):
-    """Build the autoregressive inference for ZX Spectrum.
-
-    Raises:
-        ValueError: if the assembled image would not fit in RAM at ``org``.
-    """
-
-    # Load model (supports both .pt and .npz formats)
-    print(f"Loading model from {model_path}...")
-    params, arch, charset = load_model_params(model_path)
-
-    eos_idx = len(charset) - 1
-    num_chars = len(charset)
-    print(f"Charset ({num_chars} chars): {repr(charset[:-1])} + EOS")
-
-    # Discover layers. Sorted numerically, not lexically: a 10-layer model
-    # would otherwise run fc10 straight after fc1.
-    layer_names, layer_sizes = discover_layers(params)
-    num_layers = len(layer_names)
-
-    input_size = layer_sizes[0]  # 256 (128 query + 128 context)
-    output_size = layer_sizes[-1]  # 64 characters
-
-    print(f"Architecture: {' → '.join(map(str, layer_sizes))}")
-    print(f"Input: {input_size} (128 query + 128 context)")
-    print(f"Output: {output_size} characters")
-
-    validate_z80_layers(layer_sizes)
-
-    # Pack weights and biases
-    packed_weights = []
-    biases = []
-    for name in layer_names:
-        packed_weights.append(pack_2bit_weights(params[f'{name}_weight']))
-        biases.append(params[f'{name}_bias'])
-
-    b = Z80Builder(org=org)
-
-    # === MAIN ===
-    b.label('START')
-    # Initialize ZX Spectrum screen
-    b.di()  # Disable interrupts during setup
-
-    # Clear screen using ROM routine
-    b.ld_a_n(2)  # Channel 2 (upper screen)
-    b.call_addr(ZX_CHAN_OPEN)
-    b.call_addr(ZX_CLS)
-
-    b.ei()  # Re-enable interrupts
-
-    # Enter chat mode
-    b.jp('CHAT')
-
-    # === CHAT MODE: Interactive loop with '>' prompt ===
-    b.label('CHAT')
-    b.label('CHAT_LOOP')
-    # Print newline
-    b.ld_a_n(13)
-    b.rst(ZX_PRINT_A)
-
-    # Print prompt
-    b.ld_a_n(ord('>'))
-    b.rst(ZX_PRINT_A)
-    b.ld_a_n(ord(' '))
-    b.rst(ZX_PRINT_A)
-
-    # Read input into buffer
-    b.call('READ_INPUT')
-
-    # Check if empty input
-    b.ld_a_mem_label('INPLEN')
-    b.or_a()
-    b.jr_z('CHAT_LOOP')  # Empty input, prompt again
-
-    # Check for exit command (!)
-    b.ld_a_mem_label('INPBUF')
-    b.cp_n(ord('!'))
-    b.jp_z('CHAT_EXIT')
-
-    # Process and generate response
-    b.call('TOKENIZE')
-    b.call('CLEAR_CTX')
-    b.call('GENERATE')
-
-    # Loop for next input
-    b.jp('CHAT_LOOP')
-
-    b.label('CHAT_EXIT')
-    # Return to BASIC
-    b.ld_a_n(13)
-    b.rst(ZX_PRINT_A)
-    b.ret()
-
-    # === READ_INPUT: Read a line of input from ZX Spectrum keyboard ===
-    b.label('READ_INPUT')
-    b.ld_hl_label('INPBUF')
-    b.ld_b_n(62)  # Max input length
+def emit_read_input(b: Z80Builder) -> None:
+    """Emit READ_INPUT: a keyboard line editor over the ROM key routine."""
+    b.label("READ_INPUT")
+    b.ld_hl_label("INPBUF")
+    b.ld_b_n(MAX_INPUT_LEN)
     b.xor_a()
-    b.ld_mem_label_a('INPLEN')
+    b.ld_mem_label_a("INPLEN")
 
-    b.label('RI_LOOP')
-    # Wait for key press using ROM routine
-    b.call_addr(0x10A8)  # KEY_INPUT - waits for key, returns in A
+    b.label("RI_LOOP")
+    b.call_addr(ZX_KEY_INPUT)
 
-    # Check for ENTER (code 13)
-    b.cp_n(13)
-    b.jr_z('RI_DONE')
+    b.cp_n(ZX_ENTER)
+    b.jr_z("RI_DONE")
+    b.cp_n(ZX_DELETE)
+    b.jr_z("RI_DELETE")
+    b.cp_n(ZX_SPACE)
+    b.jr_c("RI_LOOP")  # ignore other control codes
 
-    # Check for DELETE/BACKSPACE (code 12 on ZX Spectrum)
-    b.cp_n(12)
-    b.jr_z('RI_DELETE')
-
-    # Check if printable (>= 32)
-    b.cp_n(32)
-    b.jr_c('RI_LOOP')
-
-    # Check if buffer full.  Stash the character in C rather than on the
-    # stack: POP AF would restore the flags from before the CP and the branch
-    # below would then test the CP 32 above instead.  LD A,C preserves flags.
+    # Buffer full? Stash the character in C rather than on the stack: POP AF
+    # would restore the flags from before the CP and the branch below would
+    # then test the CP 32 above instead. LD A,C preserves flags.
     b.ld_c_a()
-    b.ld_a_mem_label('INPLEN')
+    b.ld_a_mem_label("INPLEN")
     b.cp_b()
     b.ld_a_c()
-    b.jr_nc('RI_LOOP')  # Buffer full, ignore
+    b.jr_nc("RI_LOOP")
 
-    # Store character
     b.push_af()
     b.push_hl()
-    b.ld_hl_label('INPBUF')
+    b.ld_hl_label("INPBUF")
     b.ld_c_a()
-    b.ld_a_mem_label('INPLEN')
+    b.ld_a_mem_label("INPLEN")
     b.ld_e_a()
     b.ld_d_n(0)
     b.add_hl_de()
     b.ld_a_c()
     b.ld_hl_a()
 
-    # Increment length
-    b.ld_a_mem_label('INPLEN')
+    b.ld_a_mem_label("INPLEN")
     b.inc_a()
-    b.ld_mem_label_a('INPLEN')
+    b.ld_mem_label_a("INPLEN")
 
-    # Echo character
     b.pop_hl()
     b.pop_af()
-    b.rst(ZX_PRINT_A)
-    b.jr('RI_LOOP')
+    b.rst(ZX_PRINT_A)  # echo
+    b.jr("RI_LOOP")
 
-    b.label('RI_DELETE')
-    # Check if buffer empty
-    b.ld_a_mem_label('INPLEN')
+    b.label("RI_DELETE")
+    b.ld_a_mem_label("INPLEN")
     b.or_a()
-    b.jr_z('RI_LOOP')
-
-    # Decrement length
+    b.jr_z("RI_LOOP")
     b.dec_a()
-    b.ld_mem_label_a('INPLEN')
+    b.ld_mem_label_a("INPLEN")
+    for code in (ZX_BACKSPACE, ZX_SPACE, ZX_BACKSPACE):
+        b.ld_a_n(code)
+        b.rst(ZX_PRINT_A)
+    b.jr("RI_LOOP")
 
-    # Echo backspace (move cursor left)
-    b.ld_a_n(8)
-    b.rst(ZX_PRINT_A)
-    b.ld_a_n(32)  # Print space
-    b.rst(ZX_PRINT_A)
-    b.ld_a_n(8)  # Move back again
-    b.rst(ZX_PRINT_A)
-    b.jr('RI_LOOP')
-
-    b.label('RI_DONE')
-    b.ld_a_n(13)
+    b.label("RI_DONE")
+    b.ld_a_n(ZX_ENTER)
     b.rst(ZX_PRINT_A)
     b.ret()
 
-    # === GENERATE: Main generation loop ===
-    b.label('GENERATE')
-    b.ld_a_n(max_output_len)
-    b.ld_mem_label_a('GENCNT')
 
-    b.label('GENLOOP')
-    # Run inference through all layers
-    for i in range(num_layers):
-        b.call(f'LAYER{i+1}')
-        if i < num_layers - 1:
-            b.call(f'RELU{i+1}')
+def emit_layer_plain(b: Z80Builder) -> None:
+    """Emit LAYER for the plain 2-bit layout, where a code maps to value - 2."""
+    b.label("LAYER")
+    b.ld_mem_label_bc("SAVCNT")
+    b.ld_mem_label_hl("SAVW")
+    b.ld_mem_label_de("SAVB")
 
-    # Find best character
-    b.call('ARGMAX')
-
-    # Check for EOS
-    b.ld_a_mem_label('RESULT')
-    b.cp_n(eos_idx)
-    b.ret_z()  # Return if EOS
-
-    # Print character
-    b.call('PRINTCH')
-
-    # Update context with new character
-    b.call('UPDATE_CTX')
-
-    # Loop if not done
-    b.ld_a_mem_label('GENCNT')
-    b.dec_a()
-    b.ld_mem_label_a('GENCNT')
-    b.jr_nz('GENLOOP')
-    b.ret()
-
-    # === PRINTCH: Print character from RESULT ===
-    b.label('PRINTCH')
-    b.ld_a_mem_label('RESULT')
-    # Look up in character table
-    b.ld_hl_label('CHARTBL')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ld_a_hl()
-    b.rst(ZX_PRINT_A)  # Use ZX Spectrum ROM print
-    b.ret()
-
-    # === UPDATE_CTX: Update context encoding with new character ===
-    b.label('UPDATE_CTX')
-    # Shift context characters left
-    b.ld_hl_label('CTXCHARS')
-    b.inc_hl()  # Point to char 1
-    b.ld_de_label('CTXCHARS')  # Point to char 0
-    b.ld_bc_nn(7)  # Copy 7 bytes
-    b.ldir()
-
-    # Store new character at end
-    b.ld_a_mem_label('RESULT')
-    b.ld_hl_label('CHARTBL')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ld_a_hl()
-    # Convert to lowercase for hashing
-    b.cp_n(ord('A'))
-    b.jr_c('UPD_STORE')
-    b.cp_n(ord('Z') + 1)
-    b.jr_nc('UPD_STORE')
-    b.add_a_n(0x20)
-    b.label('UPD_STORE')
-    b.ld_hl_label('CTXCHARS')
-    b.ld_de_nn(7)
-    b.add_hl_de()
-    b.ld_hl_a()
-
-    # Re-encode context into buckets
-    b.call('ENCODE_CTX')
-    b.ret()
-
-    # === ENCODE_CTX: Encode CTXCHARS into context buckets ===
-    b.label('ENCODE_CTX')
-    # Clear context buckets (last 128 of TOKBUF)
-    b.ld_hl_label('TOKBUF')
-    b.ld_de_nn(256)  # 128 buckets * 2 bytes
-    b.add_hl_de()
-    b.ld_d_h()
-    b.ld_e_l()
-    b.inc_de()
-    b.xor_a()
-    b.ld_hl_a()
-    b.ld_bc_nn(255)  # 128*2 - 1
-    b.ldir()
-
-    # Hash n-grams (1,2,3-grams with position)
-    b.ld_a_n(0)
-    b.ld_mem_label_a('CTXPOS')
-
-    # For each n-gram length
-    b.ld_a_n(1)
-    b.ld_mem_label_a('CTXN')
-
-    b.label('CTX_NLOOP')
-    # For each position
-    b.xor_a()
-    b.ld_mem_label_a('CTXPOS')
-
-    b.label('CTX_PLOOP')
-    # Check if we have enough chars for this n-gram
-    b.ld_a_n(9)  # 8 + 1
-    b.ld_hl_label('CTXN')
-    b.sub_hl_ind()  # A = 9 - (CTXN) = max_pos
-    b.ld_b_a()
-    b.ld_a_mem_label('CTXPOS')
-    b.cp_b()
-    b.jr_nc('CTX_NEXT_N')
-
-    # Hash this n-gram
-    b.call('CTX_HASH')
-
-    # Next position
-    b.ld_a_mem_label('CTXPOS')
-    b.inc_a()
-    b.ld_mem_label_a('CTXPOS')
-    b.jr('CTX_PLOOP')
-
-    b.label('CTX_NEXT_N')
-    b.ld_a_mem_label('CTXN')
-    b.inc_a()
-    b.ld_mem_label_a('CTXN')
-    b.cp_n(4)  # n = 1,2,3
-    b.jr_c('CTX_NLOOP')
-    b.ret()
-
-    # === CTX_HASH: Hash n-gram at position CTXPOS with length CTXN ===
-    b.label('CTX_HASH')
-    # hash = pos * 7
-    b.ld_a_mem_label('CTXPOS')
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.add_hl_hl()  # *2
-    b.add_hl_hl()  # *4
-    b.add_hl_hl()  # *8
-    b.ld_d_h()
-    b.ld_e_l()
-    b.ld_a_mem_label('CTXPOS')
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.ex_de_hl()
-    b.or_a()
-    b.sbc_hl_de()  # *7
-    b.push_hl()  # Save hash
-
-    # Get pointer to chars
-    b.ld_hl_label('CTXCHARS')
-    b.ld_a_mem_label('CTXPOS')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.ex_de_hl()  # DE = char pointer
-
-    b.pop_hl()  # Restore hash
-
-    # For each char in n-gram
-    b.ld_a_mem_label('CTXN')
-    b.ld_b_a()
-
-    b.label('CTX_HLOOP')
-    b.push_bc()
-    # hash = hash * 31 + char
-    b.push_hl()
-    b.add_hl_hl()  # *2
-    b.add_hl_hl()  # *4
-    b.add_hl_hl()  # *8
-    b.add_hl_hl()  # *16
-    b.add_hl_hl()  # *32
-    b.pop_bc()
-    b.or_a()
-    b.sbc_hl_bc()  # *31
-    b.ld_a_de()
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()  # + char
-    b.inc_de()
-    b.pop_bc()
-    b.djnz('CTX_HLOOP')
-
-    # bucket = (hash & 127) + 128
-    b.ld_a_l()
-    b.and_n(127)
-
-    # Add to bucket (context is at TOKBUF + 256)
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.add_hl_hl()  # *2 for word offset
-    b.ld_de_label('TOKBUF')
-    b.push_hl()
-    b.ld_hl_nn(256)
-    b.add_hl_de()
-    b.ex_de_hl()
-    b.pop_hl()
-    b.add_hl_de()
-
-    # Increment bucket value by 32
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.push_hl()
-    b.ld_hl_nn(32)
-    b.add_hl_de()
-    b.ex_de_hl()
-    b.pop_hl()
-    b.ld_hl_d()
-    b.dec_hl()
-    b.ld_hl_e()
-    b.ret()
-
-    # === CLEAR_CTX: Initialize context with spaces ===
-    b.label('CLEAR_CTX')
-    # Set CTXCHARS to 8 spaces
-    b.ld_hl_label('CTXCHARS')
-    b.ld_a_n(ord(' '))
-    for _ in range(8):
-        b.ld_hl_a()
-        b.inc_hl()
-
-    # Encode the initial spaces into context buckets
-    b.jp('ENCODE_CTX')  # This will return for us
-
-    # === Generate layer dispatch stubs ===
-    for i in range(num_layers):
-        in_size = layer_sizes[i]
-        out_size = layer_sizes[i + 1]
-
-        if i == 0:
-            in_buf = 'TOKBUF'
-        else:
-            in_buf = 'BUF_A' if (i % 2 == 1) else 'BUF_B'
-
-        if i == num_layers - 1:
-            out_buf = 'OUTBUF'
-        else:
-            out_buf = 'BUF_A' if ((i + 1) % 2 == 1) else 'BUF_B'
-
-        b.label(f'LAYER{i+1}')
-        b.ld_hl_label(f'WTS{i+1}')
-        b.ld_de_label(f'BIAS{i+1}')
-        b.ld_ix_label(in_buf)
-        b.ld_iy_label(out_buf)
-        b.ld_b_n(out_size if out_size <= 255 else 0)
-        b.ld_c_n(in_size if in_size <= 255 else 0)
-        if i == num_layers - 1:
-            pass  # Fall through
-        else:
-            b.jp('LAYER')
-
-    # === LAYER (neural network layer computation) ===
-    b.label('LAYER')
-    b.ld_mem_label_bc('SAVCNT')
-    b.ld_mem_label_hl('SAVW')
-    b.ld_mem_label_de('SAVB')
-
-    b.label('LNEUR')
+    b.label("LNEUR")
     b.push_bc()
     b.ld_hl_nn(0)
-    b.ld_mem_label_hl('ACC')
+    b.ld_mem_label_hl("ACC")
     b.push_ix()
     b.pop_hl()
-    b.ld_mem_label_hl('CURIN')
-    b.ld_hl_mem_label('SAVW')
-    b.ld_a_mem_label('SAVCNT')
+    b.ld_mem_label_hl("CURIN")
+    b.ld_hl_mem_label("SAVW")
+    b.ld_a_mem_label("SAVCNT")
     b.ld_b_a()
     b.ld_c_n(0)
 
-    b.label('LWT')
+    b.label("LWT")
     b.push_bc()
     b.ld_a_c()
     b.and_n(0x03)
-    b.jr_nz('LSAME')
-    b.ld_hl_mem_label('SAVW')
+    b.jr_nz("LSAME")
+    b.ld_hl_mem_label("SAVW")
     b.ld_a_hl()
-    b.ld_mem_label_a('PACKED')
+    b.ld_mem_label_a("PACKED")
     b.inc_hl()
-    b.ld_mem_label_hl('SAVW')
+    b.ld_mem_label_hl("SAVW")
 
-    b.label('LSAME')
-    b.ld_a_mem_label('PACKED')
+    b.label("LSAME")
+    b.ld_a_mem_label("PACKED")
     b.and_n(0x03)
     b.sub_n(2)
-    b.ld_mem_label_a('WEIGHT')
-    b.ld_a_mem_label('PACKED')
+    b.ld_mem_label_a("WEIGHT")
+    b.ld_a_mem_label("PACKED")
     b.rrca()
     b.rrca()
-    b.ld_mem_label_a('PACKED')
-    b.ld_hl_mem_label('CURIN')
+    b.ld_mem_label_a("PACKED")
+    b.ld_hl_mem_label("CURIN")
     b.ld_e_hl()
     b.inc_hl()
     b.ld_d_hl()
     b.inc_hl()
-    b.ld_mem_label_hl('CURIN')
-    b.ld_a_mem_label('WEIGHT')
-    b.call('MULADD')
+    b.ld_mem_label_hl("CURIN")
+    b.ld_a_mem_label("WEIGHT")
+    b.call("MULADD")
     b.pop_bc()
     b.inc_c()
-    b.djnz('LWT')
+    b.djnz("LWT")
 
-    b.ld_hl_mem_label('SAVB')
+    b.ld_hl_mem_label("SAVB")
     b.ld_e_hl()
     b.inc_hl()
     b.ld_d_hl()
     b.inc_hl()
-    b.ld_mem_label_hl('SAVB')
-    b.ld_hl_mem_label('ACC')
+    b.ld_mem_label_hl("SAVB")
+    b.ld_hl_mem_label("ACC")
     b.add_hl_de()
-    b.ld_mem_label_hl('ACC')
+    b.ld_mem_label_hl("ACC")
     b.sra_h()
     b.rr_l()
     b.sra_h()
@@ -599,296 +250,151 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.inc_iy()
     b.pop_bc()
     b.dec_b()
-    b.jp_nz('LNEUR')
+    b.jp_nz("LNEUR")
     b.ret()
 
-    # === MULADD ===
-    b.label('MULADD')
+
+def emit_muladd_plain(b: Z80Builder) -> None:
+    """Emit MULADD for the plain layout, entered with the signed weight in A."""
+    b.label("MULADD")
     b.or_a()
-    b.jr_z('MA_RET')
-    b.jp_m('MA_NEG')
-    b.ld_hl_mem_label('ACC')
+    b.jr_z("MA_RET")
+    b.jp_m("MA_NEG")
+    b.ld_hl_mem_label("ACC")
     b.add_hl_de()
-    b.ld_mem_label_hl('ACC')
+    b.ld_mem_label_hl("ACC")
     b.ret()
 
-    b.label('MA_NEG')
+    b.label("MA_NEG")
     b.cp_n(0xFF)
-    b.jr_z('MA_N1')
-    b.ld_hl_mem_label('ACC')
+    b.jr_z("MA_N1")
+    b.ld_hl_mem_label("ACC")
     b.or_a()
     b.sbc_hl_de()
     b.or_a()  # clear carry: the sbc above may have borrowed
     b.sbc_hl_de()
-    b.ld_mem_label_hl('ACC')
+    b.ld_mem_label_hl("ACC")
     b.ret()
 
-    b.label('MA_N1')
-    b.ld_hl_mem_label('ACC')
+    b.label("MA_N1")
+    b.ld_hl_mem_label("ACC")
     b.or_a()
     b.sbc_hl_de()
-    b.ld_mem_label_hl('ACC')
+    b.ld_mem_label_hl("ACC")
 
-    b.label('MA_RET')
+    b.label("MA_RET")
     b.ret()
 
-    # === ReLU stubs ===
-    for i in range(num_layers - 1):
-        out_size = layer_sizes[i + 1]
-        buf_name = 'BUF_A' if ((i + 1) % 2 == 1) else 'BUF_B'
 
-        b.label(f'RELU{i+1}')
-        b.ld_hl_label(buf_name)
-        b.ld_b_n(out_size if out_size <= 255 else 0)
-        if i == num_layers - 2:
-            pass
-        else:
-            b.jr('RELU')
+def build_autoreg(
+    model_path: str = "command_model_autoreg.pt",
+    max_output_len: int = MAX_OUTPUT_LEN,
+    org: int = ORG_ADDR,
+) -> Z80Builder:
+    """Assemble the inference engine and model into a Spectrum CODE image.
 
-    b.label('RELU')
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.bit_7_d()
-    b.jr_z('RPOS')
-    b.dec_hl()
-    b.xor_a()
-    b.ld_hl_a()
-    b.inc_hl()
-    b.ld_hl_a()
-    b.label('RPOS')
-    b.inc_hl()
-    b.djnz('RELU')
-    b.ret()
+    Args:
+        model_path: A ``.npz`` or ``.pt`` model.
+        max_output_len: Characters to generate before giving up on an EOS.
+        org: Load address. Bounds the model size, since RAM ends at FFFFh.
 
-    # === ARGMAX ===
-    b.label('ARGMAX')
-    b.ld_hl_label('OUTBUF')
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.inc_hl()
-    b.ld_mem_label_de('MAXV')
-    b.xor_a()
-    b.ld_mem_label_a('MAXI')
-    b.ld_b_n(output_size - 1)
-    b.ld_c_n(1)
+    Returns:
+        The builder, with all labels resolvable.
 
-    b.label('AMLP')
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.inc_hl()
-    b.push_hl()
-    b.ld_hl_mem_label('MAXV')
-    b.push_de()
+    Raises:
+        ValueError: If a layer is too wide for a Z80 neuron loop, or the image
+            would not fit in RAM at ``org``.
+    """
+    print(f"Loading model from {model_path}...")
+    params, _arch, charset = load_model_params(model_path)
+
+    eos_idx = len(charset) - 1
+    print(f"Charset ({len(charset)} chars): {charset[:-1]!r} + EOS")
+
+    layer_names, layer_sizes = discover_layers(params)
+    num_layers = len(layer_names)
+    input_size, output_size = layer_sizes[0], layer_sizes[-1]
+
+    print(f"Architecture: {' → '.join(map(str, layer_sizes))}")
+    print(f"Input: {input_size} (128 query + 128 context)")
+    print(f"Output: {output_size} characters")
+
+    validate_z80_layers(layer_sizes)
+
+    packed_weights = [pack_2bit_weights(params[f"{n}_weight"]) for n in layer_names]
+    biases = [params[f"{n}_bias"] for n in layer_names]
+
+    plat = ZXPlatform()
+    plans = libnn.plan_layers(layer_sizes, plat.buffer)
+    b = Z80Builder(org=org)
+
+    # === Entry ===
+    b.label("START")
+    b.di()
+    b.ld_a_n(2)  # channel 2, the upper screen
+    b.call_addr(ZX_CHAN_OPEN)
+    b.call_addr(ZX_CLS)
+    b.ei()
+    b.jp("CHAT")
+
+    # === Chat mode ===
+    b.label("CHAT")
+    b.label("CHAT_LOOP")
+    b.ld_a_n(ZX_ENTER)
+    b.rst(ZX_PRINT_A)
+    for ch in "> ":
+        b.ld_a_n(ord(ch))
+        b.rst(ZX_PRINT_A)
+
+    b.call("READ_INPUT")
+
+    b.ld_a_mem_label("INPLEN")
     b.or_a()
-    b.ex_de_hl()
-    b.sbc_hl_de()
-    b.pop_de()
-    b.jp_m('AMSK')
-    b.jr_z('AMSK')
-    b.ld_mem_label_de('MAXV')
-    b.ld_a_c()
-    b.ld_mem_label_a('MAXI')
+    b.jr_z("CHAT_LOOP")  # empty line, prompt again
 
-    b.label('AMSK')
-    b.pop_hl()
-    b.inc_c()
-    b.djnz('AMLP')
-    b.ld_a_mem_label('MAXI')
-    b.ld_mem_label_a('RESULT')
-    b.ret()
+    b.ld_a_mem_label("INPBUF")
+    b.cp_n(ord("!"))
+    b.jp_z("CHAT_EXIT")
 
-    # === TOKENIZE (query into first 128 buckets) ===
-    b.label('TOKENIZE')
-    # Clear first 128 buckets of TOKBUF
-    b.ld_hl_label('TOKBUF')
-    b.ld_de_label('TOKBUF')
-    b.inc_de()
-    b.ld_bc_nn(255)  # 128 * 2 - 1
-    b.ld_a_n(0)
-    b.ld_hl_a()
-    b.ldir()
+    b.call("TOKENIZE")
+    b.call("CLEAR_CTX")
+    b.call("GENERATE")
+    b.jp("CHAT_LOOP")
 
-    # Get input from INPBUF
-    b.ld_a_mem_label('INPLEN')
-    b.or_a()
-    b.jp_z('TOK_DONE')
-    b.ld_mem_label_a('TOKLEN')
+    b.label("CHAT_EXIT")
+    b.ld_a_n(ZX_ENTER)
+    b.rst(ZX_PRINT_A)
+    b.ret()  # back to BASIC
 
-    b.ld_de_label('INPBUF')
+    emit_read_input(b)
 
-    # Skip leading spaces
-    b.label('TOK_SKIP_SPACE')
-    b.ld_a_mem_label('TOKLEN')
-    b.or_a()
-    b.jp_z('TOK_DONE')
-    b.ld_a_de()
-    b.cp_n(ord(' '))
-    b.jr_nz('TOK_START')
-    b.inc_de()
-    b.ld_a_mem_label('TOKLEN')
-    b.dec_a()
-    b.ld_mem_label_a('TOKLEN')
-    b.jr('TOK_SKIP_SPACE')
+    # === Shared engine ===
+    libnn.emit_generate(b, plat, eos_idx, max_output_len,
+                        libnn.emit_layered_inference(plans))
+    libnn.emit_printch(b, plat)
+    libnn.emit_update_ctx(b, plat)
+    libnn.emit_encode_ctx(b, plat)
+    libnn.emit_ctx_hash(b, plat)
+    libnn.emit_clear_ctx(b, plat)
+    libnn.emit_layer_dispatch(b, plans)
+    emit_layer_plain(b)
+    emit_muladd_plain(b)
+    libnn.emit_relu(b, plans)
+    libnn.emit_argmax(b, output_size)
+    libnn.emit_tokenizer(b, plat)
+    libnn.emit_tok_hash(b, plat)
 
-    b.label('TOK_START')
-    b.ld_a_n(ord(' '))
-    b.ld_mem_label_a('TOKC1')
-    b.ld_a_de()
-    b.cp_n(ord('A'))
-    b.jr_c('TOK_FIRST_LOW')
-    b.cp_n(ord('Z') + 1)
-    b.jr_nc('TOK_FIRST_LOW')
-    b.add_a_n(0x20)
-    b.label('TOK_FIRST_LOW')
-    b.ld_mem_label_a('TOKC2')
-    b.inc_de()
-    b.ld_a_mem_label('TOKLEN')
-    b.dec_a()
-    b.ld_mem_label_a('TOKLEN')
+    # === Data ===
+    libnn.emit_charset_table(b, charset)
+    libnn.emit_variables(b)
 
-    b.label('TOK_LOOP')
-    b.ld_a_mem_label('TOKLEN')
-    b.or_a()
-    b.jr_z('TOK_TRAIL')
-    b.ld_a_de()
-    b.cp_n(ord('A'))
-    b.jr_c('TOK_LOW1')
-    b.cp_n(ord('Z') + 1)
-    b.jr_nc('TOK_LOW1')
-    b.add_a_n(0x20)
-    b.label('TOK_LOW1')
-    b.ld_mem_label_a('TOKC3')
-    b.call('TOK_HASH')
-    b.ld_a_mem_label('TOKC2')
-    b.ld_mem_label_a('TOKC1')
-    b.ld_a_mem_label('TOKC3')
-    b.ld_mem_label_a('TOKC2')
-    b.inc_de()
-    b.ld_a_mem_label('TOKLEN')
-    b.dec_a()
-    b.ld_mem_label_a('TOKLEN')
-    b.jr('TOK_LOOP')
+    b.label("INPLEN")
+    b.db(0)
+    b.label("INPBUF")
+    b.ds(MAX_INPUT_LEN)
 
-    b.label('TOK_TRAIL')
-    b.ld_a_n(ord(' '))
-    b.ld_mem_label_a('TOKC3')
-    b.call('TOK_HASH')
-    b.jr('TOK_DONE')
-
-    # === TOK_HASH ===
-    b.label('TOK_HASH')
-    b.push_de()
-    b.ld_a_mem_label('TOKC1')
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.push_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.pop_de()
-    b.or_a()
-    b.sbc_hl_de()
-    b.ld_a_mem_label('TOKC2')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-    b.push_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.add_hl_hl()
-    b.pop_de()
-    b.or_a()
-    b.sbc_hl_de()
-    b.ld_a_mem_label('TOKC3')
-    b.ld_c_a()
-    b.ld_b_n(0)
-    b.add_hl_bc()
-
-    # bucket = L & 127 (first 128 buckets only)
-    b.ld_a_l()
-    b.and_n(127)
-
-    # TOKBUF[bucket] += 32
-    b.ld_l_a()
-    b.ld_h_n(0)
-    b.add_hl_hl()
-    b.push_de()
-    b.ld_de_label('TOKBUF')
-    b.add_hl_de()
-    b.ld_e_hl()
-    b.inc_hl()
-    b.ld_d_hl()
-    b.ld_bc_nn(32)
-    b.ex_de_hl()
-    b.add_hl_bc()
-    b.ex_de_hl()
-    b.ld_a_d()
-    b.ld_hl_a()
-    b.dec_hl()
-    b.ld_a_e()
-    b.ld_hl_a()
-    b.pop_de()
-    b.pop_de()
-    b.ret()
-
-    b.label('TOK_DONE')
-    b.ret()
-
-    # === DATA ===
-    # Character table (dynamic size based on charset)
-    b.label('CHARTBL')
-    for c in charset:
-        if c == '\x00':
-            b.db(0)  # EOS
-        else:
-            b.db(ord(c))
-
-    # Variables
-    b.label('SAVCNT'); b.dw(0)
-    b.label('SAVW'); b.dw(0)
-    b.label('SAVB'); b.dw(0)
-    b.label('CURIN'); b.dw(0)
-    b.label('PACKED'); b.db(0)
-    b.label('WEIGHT'); b.db(0)
-    b.label('ACC'); b.dw(0)
-    b.label('MAXV'); b.dw(0)
-    b.label('MAXI'); b.db(0)
-    b.label('RESULT'); b.db(0)
-    b.label('GENCNT'); b.db(0)
-    b.label('TOKLEN'); b.db(0)
-    b.label('TOKC1'); b.db(0)
-    b.label('TOKC2'); b.db(0)
-    b.label('TOKC3'); b.db(0)
-    b.label('CTXPOS'); b.db(0)
-    b.label('CTXN'); b.db(0)
-    b.label('CTXCHARS'); b.ds(8)  # Last 8 output characters
-
-    # Input buffer
-    b.label('INPLEN'); b.db(0)
-    b.label('INPBUF'); b.ds(62)
-
-    # Buffers
-    b.label('TOKBUF'); b.ds(input_size * 2)  # 256 buckets * 2 bytes
-    max_hidden = max(layer_sizes[1:-1]) if len(layer_sizes) > 2 else layer_sizes[1]
-    b.label('BUF_A'); b.ds(max_hidden * 2)
-    b.label('BUF_B'); b.ds(max_hidden * 2)
-    b.label('OUTBUF'); b.ds(output_size * 2)
-
-    # Weights and biases
-    for i in range(num_layers):
-        b.label(f'WTS{i+1}')
-        b.db(*packed_weights[i])
-
-        b.label(f'BIAS{i+1}')
-        for v in biases[i]:
-            b.dw(int(v) & 0xFFFF)
+    libnn.emit_buffers(b, plat, layer_sizes)
+    libnn.emit_weights(b, packed_weights, biases)
 
     # A .TAP whose image runs past FFFFh cannot load on any Spectrum, so refuse
     # to emit one rather than shipping a tape that fails halfway through.
@@ -904,53 +410,46 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     return b
 
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='Build Z80 autoregressive .TAP for ZX Spectrum')
-    parser.add_argument('--model', '-m', type=str, default='command_model_autoreg.pt',
-                        help='Model file to load')
-    parser.add_argument('--output', '-o', type=str, default='CHAT.TAP',
-                        help='Output .TAP file')
-    parser.add_argument('--org', type=lambda v: int(v, 0), default=ORG_ADDR,
-                        help=f'Load address (default {ORG_ADDR:#06x})')
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Build Z80 autoregressive .TAP for ZX Spectrum"
+    )
+    parser.add_argument("--model", "-m", default="command_model_autoreg.pt",
+                        help="Model file to load")
+    parser.add_argument("--output", "-o", default="CHAT.TAP",
+                        help="Output .TAP file")
+    parser.add_argument("--max-output-len", type=int, default=MAX_OUTPUT_LEN,
+                        help="Maximum characters generated per response")
+    parser.add_argument("--org", type=lambda v: int(v, 0), default=ORG_ADDR,
+                        help=f"Load address (default {ORG_ADDR:#06x})")
     args = parser.parse_args()
 
     print("Building ZX Spectrum CHAT.TAP...\n")
+    b = build_autoreg(args.model, max_output_len=args.max_output_len, org=args.org)
 
-    b = build_autoreg(args.model, org=args.org)
-
-    # Show key addresses
     print("\nKey addresses:")
-    for name in ['START', 'GENERATE', 'LAYER', 'ARGMAX', 'TOKENIZE', 'UPDATE_CTX', 'CHARTBL']:
+    for name in ("START", "GENERATE", "LAYER", "ARGMAX", "TOKENIZE",
+                 "UPDATE_CTX", "CHARTBL"):
         if name in b.labels:
             print(f"  {name}: {b.labels[name]:04X}h")
 
-    # Resolve labels
-    b.resolve()
+    image = b.build()
+    tap_data = build_tap_header("CHAT", b.org, len(image)) + build_tap_data(image)
 
-    # Build TAP file
-    print(f"\nBuilding TAP file...")
-    tap_data = bytearray()
+    with open(args.output, "wb") as fh:
+        fh.write(tap_data)
 
-    # Header block
-    header = build_tap_header("CHAT", b.org, len(b.code))
-    tap_data.extend(header)
-
-    # Data block
-    data = build_tap_data(b.code)
-    tap_data.extend(data)
-
-    # Save TAP file
-    with open(args.output, 'wb') as f:
-        f.write(tap_data)
-
-    headroom = ZX_RAM_TOP - (b.org + len(b.code))
-    print(f"Total code size: {len(b.code)} bytes ({len(b.code)/1024:.1f} KB)")
+    headroom = ZX_RAM_TOP - (b.org + len(image))
+    print(f"\nTotal code size: {len(image)} bytes ({len(image) / 1024:.1f} KB)")
     print(f"TAP file size: {len(tap_data)} bytes")
-    print(f"Loads at {b.org:#06x}-{b.org + len(b.code) - 1:#06x}, "
+    print(f"Loads at {b.org:#06x}-{b.org + len(image) - 1:#06x}, "
           f"{headroom:,} bytes of RAM to spare")
     print(f"Saved to {args.output}")
     print("\nIn ZX Spectrum BASIC:")
     print(f"  CLEAR {b.org - 1}")
     print('  LOAD "" CODE')
     print(f"  RANDOMIZE USR {b.org}")
+
+
+if __name__ == "__main__":
+    main()
