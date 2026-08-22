@@ -60,3 +60,9 @@ tests — the `MULADD` borrow and the packed-weight row desync — produced corr
 End-to-end tests use a synthetic 256→16→12 model and generate 8 characters, so a
 full forward pass is a few hundred thousand emulated instructions rather than a
 few million. The shipped examples are covered by the `slow`-marked tests.
+
+To time a target rather than check it:
+
+```bash
+python bench.py --model examples/guess/model.npz --target com fast
+```

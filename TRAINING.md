@@ -157,9 +157,9 @@ The input is split evenly: the first 128 values encode the user's query using tr
 
 **Modifying the Architecture:**
 
-To change layer sizes, edit line 382 in `feedme.py`:
-```python
-hidden_sizes = [256, 192, 128]  # Three hidden layers
+Pass `--hidden-sizes` on the command line:
+```bash
+python feedme.py --hidden-sizes 256,192,128 --file training-data.txt
 ```
 
 Trade-offs:

@@ -56,6 +56,19 @@ Get running in under 5 minutes:
 
 For building from source or training your own models, see [TRAINING.md](TRAINING.md).
 
+## Building
+
+`build.py` is one front end for every target. By default it picks the fastest
+weight layout that still fits the machine:
+
+```bash
+python build.py --model examples/guess/model.npz --output GUESS.COM
+python build.py --model examples/guess/model.npz --target zx --output GUESS.TAP
+```
+
+The individual builders (`buildz80com.py`, `buildfastz80com.py`,
+`buildz80tap.py`) still work standalone if you want a specific layout.
+
 ## Features
 
 - **Trigram hash encoding**: Input text is hashed into 128 buckets - typo-tolerant, word-order invariant
@@ -73,6 +86,7 @@ For building from source or training your own models, see [TRAINING.md](TRAINING
 Z80-μLM runs on multiple Z80-based platforms:
 
 - **CP/M**: Original target platform. Generates `.COM` files using `buildz80com.py`
+  (packed weights) or `buildfastz80com.py` (index lists, ~9x faster, slightly larger)
 - **ZX Spectrum 48K**: Full support via `buildz80tap.py`. See [ZX-SPECTRUM.md](ZX-SPECTRUM.md) for details
   - Generates `.TAP` files for emulators or real hardware
   - Uses ZX Spectrum ROM routines for I/O
@@ -80,6 +94,21 @@ Z80-μLM runs on multiple Z80-based platforms:
   - Compatible with most ZX Spectrum emulators
 
 For ZX Spectrum builds, use `run-zx.sh` in example directories or see the [ZX Spectrum guide](ZX-SPECTRUM.md).
+
+## How fast is it?
+
+`bench.py` runs a target in the emulator and counts what one generated character
+costs. For the shipped 256→256→192→128→11 `guess` model:
+
+| target | size | instructions | Z80 T-states | seconds |
+|---|---|---|---|---|
+| CP/M, packed weights | 38,920 | 3,004,037 | 26,843,795 | 6.71 @ 4 MHz |
+| CP/M, index lists | 43,520 | 319,515 | 1,992,905 | 0.50 @ 4 MHz |
+| ZX Spectrum | 38,981 | 4,245,425 | 41,169,261 | 11.76 @ 3.5 MHz |
+
+```bash
+python bench.py --model examples/guess/model.npz --target com fast
+```
 
 ## Interaction Style
 
