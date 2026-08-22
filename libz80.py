@@ -11,6 +11,9 @@ from typing import List, Dict, Tuple
 class Z80Builder:
     """Simple Z80 code builder with label support"""
 
+    #: Width of an address operand. eZ80 ADL mode overrides this to 3.
+    addr_size = 2
+
     def __init__(self, org: int = 0x0100):
         self.org = org
         self.code = bytearray()
@@ -28,16 +31,23 @@ class Z80Builder:
             self.code.append(b & 0xFF)
 
     def emit_word(self, val: int):
+        """Emit a 16-bit datum. Always two bytes, even in ADL mode."""
         self.emit(val & 0xFF, (val >> 8) & 0xFF)
+
+    def emit_addr(self, val: int):
+        """Emit an address or `LD rr,nn` immediate (2 bytes, 3 in ADL mode)."""
+        for k in range(self.addr_size):
+            self.emit((val >> (8 * k)) & 0xFF)
 
     def align(self, boundary: int):
         overage = self.addr() % boundary
-        if overage < boundary: self.ds(boundary - overage)
+        if overage:
+            self.ds(boundary - overage)
 
     def fixup_word(self, label: str):
-        """Emit placeholder word, record fixup"""
+        """Emit placeholder address, record fixup"""
         self.fixups.append((len(self.code), label, 'abs'))
-        self.emit(0, 0)
+        self.emit(*([0] * self.addr_size))
 
     def fixup_rel(self, label: str):
         """Emit placeholder byte for relative jump"""
@@ -52,8 +62,8 @@ class Z80Builder:
             target = self.labels[label]
 
             if ftype == 'abs':
-                self.code[offset] = target & 0xFF
-                self.code[offset + 1] = (target >> 8) & 0xFF
+                for k in range(self.addr_size):
+                    self.code[offset + k] = (target >> (8 * k)) & 0xFF
             elif ftype == 'rel':
                 # Relative offset from instruction after the offset byte
                 from_addr = self.org + offset + 1
@@ -62,11 +72,16 @@ class Z80Builder:
                     raise ValueError(f"Relative jump out of range: {label} = {rel}")
                 self.code[offset] = rel & 0xFF
 
-    def save(self, filename: str):
+    def build(self) -> bytes:
+        """Resolve fixups and return the finished image."""
         self.resolve()
+        return bytes(self.code)
+
+    def save(self, filename: str):
+        image = self.build()
         with open(filename, 'wb') as f:
-            f.write(self.code)
-        print(f"Wrote {len(self.code)} bytes to {filename}")
+            f.write(image)
+        print(f"Wrote {len(image)} bytes to {filename}")
 
     # === Z80 Instructions ===
 
@@ -74,6 +89,8 @@ class Z80Builder:
     def ret(self): self.emit(0xC9)
     def ret_z(self): self.emit(0xC8)  # RET Z
     def ret_nz(self): self.emit(0xC0)  # RET NZ
+    def ret_c(self): self.emit(0xD8)  # RET C
+    def ret_nc(self): self.emit(0xD0)  # RET NC
     def rst(self, n): self.emit(0xC7 | n)
     def halt(self): self.emit(0x76)
     def di(self): self.emit(0xF3)
@@ -88,7 +105,8 @@ class Z80Builder:
         self.fixup_word(label)
 
     def call_addr(self, addr: int):
-        self.emit(0xCD, addr & 0xFF, (addr >> 8) & 0xFF)
+        self.emit(0xCD)
+        self.emit_addr(addr)
 
     def jp(self, label: str):
         self.emit(0xC3)
@@ -131,11 +149,16 @@ class Z80Builder:
         self.fixup_rel(label)
 
     # Loads
-    def ld_hl_nn(self, val): self.emit(0x21); self.emit_word(val)
-    def ld_de_nn(self, val): self.emit(0x11); self.emit_word(val)
-    def ld_bc_nn(self, val): self.emit(0x01); self.emit_word(val)
-    def ld_ix_nn(self, val): self.emit(0xDD, 0x21); self.emit_word(val)
-    def ld_iy_nn(self, val): self.emit(0xFD, 0x21); self.emit_word(val)
+    def ld_hl_nn(self, val): self.emit(0x21); self.emit_addr(val)
+    def ld_de_nn(self, val): self.emit(0x11); self.emit_addr(val)
+    def ld_bc_nn(self, val): self.emit(0x01); self.emit_addr(val)
+    def ld_sp_nn(self, val): self.emit(0x31); self.emit_addr(val)
+    def ld_ix_nn(self, val): self.emit(0xDD, 0x21); self.emit_addr(val)
+    def ld_iy_nn(self, val): self.emit(0xFD, 0x21); self.emit_addr(val)
+
+    def ld_sp_label(self, label: str):
+        self.emit(0x31)
+        self.fixup_word(label)
 
     def ld_hl_label(self, label: str):
         self.emit(0x21)
@@ -231,6 +254,7 @@ class Z80Builder:
 
     # Arithmetic
     def add_a_n(self, val): self.emit(0xC6, val & 0xFF)
+    def adc_a_n(self, val): self.emit(0xCE, val & 0xFF)
     def sub_n(self, val): self.emit(0xD6, val & 0xFF)
     def and_n(self, val): self.emit(0xE6, val & 0xFF)
     def or_a(self): self.emit(0xB7)
@@ -316,6 +340,8 @@ class Z80Builder:
     def ld_e_l(self): self.emit(0x5D)  # LD E,L
     def ld_hl_d(self): self.emit(0x72)  # LD (HL),D
     def ld_hl_e(self): self.emit(0x73)  # LD (HL),E
+    def ld_hl_c(self): self.emit(0x71)  # LD (HL),C
+    def ld_hl_b(self): self.emit(0x70)  # LD (HL),B
 
     # Stack
     def push_af(self): self.emit(0xF5)
@@ -346,6 +372,10 @@ class Z80Builder:
     def db(self, *vals):
         for v in vals:
             self.emit(v)
+
+    def blob(self, data: bytes):
+        """Append raw bytes. Much faster than db(*data) for large payloads."""
+        self.code.extend(data)
 
     def dw(self, *vals):
         for v in vals:

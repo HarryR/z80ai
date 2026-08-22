@@ -1,9 +1,15 @@
 __pycache__
 .claude
+.cachebro
 old*
 cpm
 *.pt
 *.COM
 *.com
+*.TAP
+*.tap
+*.bin
 packages/
 dist/
+.venv/
+.pytest_cache/

@@ -20,6 +20,7 @@ import numpy as np
 from typing import List, Tuple
 from collections import Counter
 
+import libinfer
 from libqat import OverflowAwareLinear
 
 
@@ -70,31 +71,20 @@ def idx_to_char(i: int) -> str:
 
 
 class TrigramEncoder:
-    """Encode text into trigram hash buckets (integer-friendly, no normalization)."""
+    """Encode text into trigram hash buckets (integer-friendly, no normalization).
+
+    Delegates to :mod:`libinfer` so training sees exactly the features the Z80
+    TOKENIZE routine produces; the only difference is the scale factor, which
+    the network's first layer absorbs.
+    """
 
     def __init__(self, num_buckets: int = 128):
         self.num_buckets = num_buckets
 
-    def _hash_trigram(self, trigram: str) -> int:
-        """Hash a trigram to a bucket index."""
-        h = 0
-        for c in trigram:
-            h = (h * 31 + ord(c)) & 0xFFFF
-        return h % self.num_buckets
-
     def encode(self, text: str) -> np.ndarray:
         """Encode text into bucket counts (raw counts, Z80-compatible)."""
-        vec = np.zeros(self.num_buckets, dtype=np.float32)
-        text = text.lower()
-        text = ' ' + text + ' '  # Pad for boundary trigrams
-
-        for i in range(len(text) - 2):
-            trigram = text[i:i+3]
-            bucket = self._hash_trigram(trigram)
-            vec[bucket] += 1.0
-
-        # No normalization - use raw counts for Z80 compatibility
-        return vec
+        vec = libinfer.trigram_encode(text, self.num_buckets)
+        return vec.astype(np.float32) / libinfer.BUCKET_WEIGHT
 
 
 class ContextEncoder:
@@ -104,30 +94,10 @@ class ContextEncoder:
         self.num_buckets = num_buckets
         self.context_len = context_len
 
-    def _hash_ngram(self, ngram: str, offset: int = 0) -> int:
-        """Hash an n-gram with position offset."""
-        h = offset * 7
-        for c in ngram:
-            h = (h * 31 + ord(c)) & 0xFFFF
-        return h % self.num_buckets
-
     def encode(self, recent_chars: str) -> np.ndarray:
         """Encode recent output characters (raw counts, Z80-compatible)."""
-        vec = np.zeros(self.num_buckets, dtype=np.float32)
-
-        # Pad to context_len
-        recent = recent_chars[-self.context_len:].lower()
-        recent = recent.rjust(self.context_len)
-
-        # Hash character n-grams with position info
-        for n in [1, 2, 3]:  # Unigrams, bigrams, trigrams
-            for i in range(len(recent) - n + 1):
-                ngram = recent[i:i+n]
-                bucket = self._hash_ngram(ngram, offset=i)
-                vec[bucket] += 1.0
-
-        # No normalization - use raw counts for Z80 compatibility
-        return vec
+        vec = libinfer.context_encode(recent_chars, self.num_buckets, self.context_len)
+        return vec.astype(np.float32) / libinfer.BUCKET_WEIGHT
 
 
 def create_training_examples(query: str, response: str,
@@ -216,8 +186,10 @@ class AutoregressiveModel(nn.Module):
             # Simulate 16-bit signed overflow (wrap around)
             x = ((x + 32768) % 65536) - 32768
 
-            # Shift down (divide by 4, arithmetic right shift)
-            x = torch.div(x, 4, rounding_mode='trunc')
+            # Shift down by 2. SRA H / RR L on hardware is an arithmetic shift,
+            # which floors; truncating toward zero would be off by one for every
+            # negative accumulator and overstate the reported integer accuracy.
+            x = torch.div(x, 4, rounding_mode='floor')
 
             # ReLU (except last layer)
             if i < len(self.layers) - 1:
@@ -342,12 +314,22 @@ def validate_charset(pairs: List[Tuple[str, str]], charset: str) -> None:
                                f"Charset was built from first chunk and cannot change.")
 
 
+#: Widest layer the Z80 backends can emit. Their neuron loops count in B, so a
+#: layer of 256 is the most DJNZ can express. The eZ80 backend uses sentinels
+#: instead of counters and has no such limit.
+Z80_MAX_LAYER = 256
+
+
 def parse_hidden_sizes(spec: str) -> list[int]:
     vals = [int(x.strip()) for x in spec.split(',') if x.strip()]
     if not vals:
         raise ValueError("hidden size list cannot be empty")
-    if any(v <= 0 or v > 255 for v in vals):
-        raise ValueError("hidden sizes must be in range 1..255")
+    if any(v <= 0 or v > 65535 for v in vals):
+        raise ValueError("hidden sizes must be in range 1..65535")
+    oversized = [v for v in vals if v > Z80_MAX_LAYER]
+    if oversized:
+        print(f"Note: layers {oversized} exceed {Z80_MAX_LAYER} neurons and will "
+              f"only build for eZ80 (buildez80.py), not for Z80 targets.")
     return vals
 
 
