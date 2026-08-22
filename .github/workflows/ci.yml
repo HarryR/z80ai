@@ -5,8 +5,9 @@ on:
     branches: [main]
     tags:
       - 'v*'
+  # Unfiltered, so pull requests stacked on other feature branches are tested
+  # too, not only those targeting main.
   pull_request:
-    branches: [main]
 
 jobs:
   test:
