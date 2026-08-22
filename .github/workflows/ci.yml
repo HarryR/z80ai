@@ -5,11 +5,31 @@ on:
     branches: [main]
     tags:
       - 'v*'
+  # Unfiltered, so pull requests stacked on other feature branches are tested
+  # too, not only those targeting main.
   pull_request:
-    branches: [main]
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install numpy pytest
+
+      - name: Run test suite
+        run: pytest -q
+
   build:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:

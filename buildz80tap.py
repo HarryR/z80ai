@@ -15,6 +15,7 @@ This generates Z80 machine code for ZX Spectrum 48:
 """
 
 import numpy as np
+from libinfer import discover_layers, pack_2bit, validate_z80_layers
 from libz80 import Z80Builder
 from loadmodel import load_model_params
 
@@ -31,19 +32,8 @@ ORG_ADDR = 0x8000
 
 
 def pack_2bit_weights(weights: np.ndarray) -> bytes:
-    """Pack 2-bit weights: 4 per byte, LSB first"""
-    flat = weights.flatten()
-    mapped = np.clip(flat + 2, 0, 3).astype(np.uint8)
-
-    packed = []
-    for i in range(0, len(mapped), 4):
-        chunk = mapped[i:i+4]
-        if len(chunk) < 4:
-            chunk = np.pad(chunk, (0, 4 - len(chunk)), constant_values=2)
-        byte = int(chunk[0]) | (int(chunk[1]) << 2) | (int(chunk[2]) << 4) | (int(chunk[3]) << 6)
-        packed.append(byte)
-
-    return bytes(packed)
+    """Pack 2-bit weights, four per byte, one output neuron per whole bytes."""
+    return pack_2bit(weights, layout='plain')
 
 
 def build_tap_header(filename: str, start: int, length: int) -> bytes:
@@ -106,7 +96,8 @@ def build_tap_data(data: bytes) -> bytes:
     return bytes(tap_block)
 
 
-def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
+def build_autoreg(model_path: str = 'command_model_autoreg.pt',
+                  max_output_len: int = MAX_OUTPUT_LEN):
     """Build the autoregressive inference for ZX Spectrum"""
 
     # Load model (supports both .pt and .npz formats)
@@ -117,18 +108,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     num_chars = len(charset)
     print(f"Charset ({num_chars} chars): {repr(charset[:-1])} + EOS")
 
-    # Discover layers
-    layer_names = sorted(set(k.replace('_weight', '').replace('_bias', '')
-                            for k in params.keys()))
+    # Discover layers. Sorted numerically, not lexically: a 10-layer model
+    # would otherwise run fc10 straight after fc1.
+    layer_names, layer_sizes = discover_layers(params)
     num_layers = len(layer_names)
-
-    # Get layer dimensions
-    layer_sizes = []
-    for i, name in enumerate(layer_names):
-        w = params[f'{name}_weight']
-        if i == 0:
-            layer_sizes.append(w.shape[1])
-        layer_sizes.append(w.shape[0])
 
     input_size = layer_sizes[0]  # 256 (128 query + 128 context)
     output_size = layer_sizes[-1]  # 64 characters
@@ -136,6 +119,8 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     print(f"Architecture: {' → '.join(map(str, layer_sizes))}")
     print(f"Input: {input_size} (128 query + 128 context)")
     print(f"Output: {output_size} characters")
+
+    validate_z80_layers(layer_sizes)
 
     # Pack weights and biases
     packed_weights = []
@@ -224,11 +209,13 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.cp_n(32)
     b.jr_c('RI_LOOP')
 
-    # Check if buffer full
-    b.push_af()
+    # Check if buffer full.  Stash the character in C rather than on the
+    # stack: POP AF would restore the flags from before the CP and the branch
+    # below would then test the CP 32 above instead.  LD A,C preserves flags.
+    b.ld_c_a()
     b.ld_a_mem_label('INPLEN')
     b.cp_b()
-    b.pop_af()
+    b.ld_a_c()
     b.jr_nc('RI_LOOP')  # Buffer full, ignore
 
     # Store character
@@ -280,7 +267,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
 
     # === GENERATE: Main generation loop ===
     b.label('GENERATE')
-    b.ld_a_n(MAX_OUTPUT_LEN)
+    b.ld_a_n(max_output_len)
     b.ld_mem_label_a('GENCNT')
 
     b.label('GENLOOP')
@@ -619,6 +606,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.ld_hl_mem_label('ACC')
     b.or_a()
     b.sbc_hl_de()
+    b.or_a()  # clear carry: the sbc above may have borrowed
     b.sbc_hl_de()
     b.ld_mem_label_hl('ACC')
     b.ret()

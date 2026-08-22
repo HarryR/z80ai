@@ -15,6 +15,7 @@ This generates Z80 machine code for character-by-character text generation:
 """
 
 import numpy as np
+from libinfer import discover_layers, pack_2bit, validate_z80_layers
 from libz80 import Z80Builder
 from loadmodel import load_model_params
 
@@ -25,39 +26,17 @@ MAX_OUTPUT_LEN = 50  # Maximum characters to generate
 
 
 def pack_2bit_weights(weights: np.ndarray) -> bytes:
-    """Pack 2-bit weights: 4 per byte, LSB first"""
-    flat = weights.flatten()
-    mapped = np.clip(flat + 2, 0, 3).astype(np.uint8)
+    """Pack 2-bit weights, four per byte, one output neuron per whole bytes.
 
-    packed = []
-    for i in range(0, len(mapped), 4):
-        chunk = mapped[i:i+4]
-        if len(chunk) < 4:
-            chunk = np.pad(chunk, (0, 4 - len(chunk)), constant_values=2)
-        # 0,1,2,3 are as -2,-1,0,1 but in muladd for speed will be treated as -2,0,1,-1                        
-        for c in range(4):
-            match int(chunk[c]):
-                case 0:
-                    chunk[c] = 0 # -2 in position 0
-                case 1:
-                    chunk[c] = 3 # -1 in position 3
-                case 2:
-                    chunk[c] = 1 # 0 in position 1
-                case 3:
-                    chunk[c] = 2 # 1 in position 2
-                case _:
-                    raise Exception("weight value not valid")
-        byte = \
-            (chunk[2] << 6) | \
-            (chunk[1] << 4) | \
-            (chunk[0] << 2) | \
-            (chunk[3]) # chunk 3 as last since in the evaluation there will be first a rotation
-        packed.append(byte)
-
-    return bytes(packed)
+    The nibble order is scrambled so MULADD can decide between {-2,-1,0,+1}
+    with two DECs, putting the most common weight (zero) on the fastest path.
+    See ``libinfer.pack_2bit`` for the encoding.
+    """
+    return pack_2bit(weights, layout='rotated')
 
 
-def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
+def build_autoreg(model_path: str = 'command_model_autoreg.pt',
+                  max_output_len: int = MAX_OUTPUT_LEN):
     """Build the autoregressive inference .COM"""
 
     # Load model (supports both .pt and .npz formats)
@@ -68,18 +47,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     num_chars = len(charset)
     print(f"Charset ({num_chars} chars): {repr(charset[:-1])} + EOS")
 
-    # Discover layers
-    layer_names = sorted(set(k.replace('_weight', '').replace('_bias', '')
-                            for k in params.keys()))
+    # Discover layers. Sorted numerically, not lexically: a 10-layer model
+    # would otherwise run fc10 straight after fc1.
+    layer_names, layer_sizes = discover_layers(params)
     num_layers = len(layer_names)
-
-    # Get layer dimensions
-    layer_sizes = []
-    for i, name in enumerate(layer_names):
-        w = params[f'{name}_weight']
-        if i == 0:
-            layer_sizes.append(w.shape[1])
-        layer_sizes.append(w.shape[0])
 
     input_size = layer_sizes[0]  # 256 (128 query + 128 context)
     output_size = layer_sizes[-1]  # 64 characters
@@ -87,6 +58,8 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     print(f"Architecture: {' → '.join(map(str, layer_sizes))}")
     print(f"Input: {input_size} (128 query + 128 context)")
     print(f"Output: {output_size} characters")
+
+    validate_z80_layers(layer_sizes)
 
     # Pack weights and biases
     packed_weights = []
@@ -169,7 +142,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
 
     # === GENERATE: Main generation loop ===
     b.label('GENERATE')
-    b.ld_a_n(MAX_OUTPUT_LEN)
+    b.ld_a_n(max_output_len)
     b.ld_mem_label_a('GENCNT')
 
     b.label('GENLOOP')
@@ -499,9 +472,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.ld_hl_mem_label('ACC')    #   ld hl, (ACC)                          
     b.dec_a()                   #   dec a          
     b.jr_z('MA_P1')             #   jr z, MA_P1 ; jump if a is +1 equivalent (33% jump probability)
-    b.sbc_hl_de()               #   sbc hl, de ; a is -1 or -2 equivalent             
-    b.dec_a()                   #   dec a          
+    b.sbc_hl_de()               #   sbc hl, de ; a is -1 or -2 equivalent (carry is clear on entry)
+    b.dec_a()                   #   dec a
     b.jr_z('MA_MRET')           #   jr z, MA_MRET ; skip next sbc if a is just -1 equivalent (50% jump probability)
+    b.or_a()                    #   or a ; clear carry: the sbc above may have borrowed
     b.sbc_hl_de()               #   sbc hl, de ; second time since a is -2 equivalent
     b.label('MA_MRET')          # MA_MRET:               
     b.ld_mem_label_hl('ACC')    #   ld (ACC), hl                          
