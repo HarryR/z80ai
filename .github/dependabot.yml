@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Action versions go stale quietly and only surface as deprecation warnings
+  # in job logs, so let Dependabot raise them as reviewable PRs instead.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "deps"
+    labels:
+      - dependencies

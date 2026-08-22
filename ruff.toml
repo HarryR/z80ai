@@ -1,0 +1,11 @@
+# CI gates on defects only: syntax errors, undefined names, broken comparisons
+# and redefinitions. Ruff's wider default set flags a fair amount of
+# pre-existing style debt - notably the one-line opcode definitions in
+# libz80.py, which are deliberate - so the rest is reported in the job summary
+# rather than blocking a merge. See the "Lint" job in .github/workflows/ci.yml.
+
+line-length = 100
+exclude = [".venv", "venv", "build", "dist"]
+
+[lint]
+select = ["E9", "F63", "F7", "F82", "F811"]

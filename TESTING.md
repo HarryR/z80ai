@@ -1,13 +1,13 @@
 # Testing
 
 ```bash
-pip install numpy pytest
+pip install -r requirements-dev.txt
 pytest                  # everything
 pytest -m "not slow"    # skip the full-size model runs (~20s instead of ~45s)
 ```
 
 Nothing here needs PyTorch. Six tests that check the training-time encoders
-against the reference are skipped if torch is absent.
+against the reference are skipped if torch is absent. Python 3.10 or newer.
 
 ## How it works
 
@@ -47,6 +47,29 @@ the bytes.
 | `test_builders.py` | TAP container layout, TPA size limits, embedded weight/bias/charset data |
 | `test_model_shapes.py` | Layer discovery order, and the widths a Z80 backend can actually assemble |
 | `test_build_frontend.py` | Automatic target selection |
+| `test_verify_artifacts.py` | The release verifier's own failure paths |
+
+## In CI
+
+`.github/workflows/ci.yml` runs four jobs. Beyond the test suite, the ones that
+matter are in `build`:
+
+| Check | What it stops |
+|---|---|
+| `ruff check` | Syntax errors, undefined names, broken comparisons, redefinitions. Style debt is reported in the job summary but not gated - see `ruff.toml` |
+| Test matrix | Python 3.10 through 3.13, `fail-fast: false` so one version failing doesn't hide the rest |
+| Reproducible build | Builds everything twice and compares byte for byte. A build that picks up dict ordering or a hash seed would stop matching what anyone can rebuild |
+| Artifact verification | Boots every release binary in the emulator and compares its output to the reference. **A binary that assembles but computes the wrong answer cannot reach a release** |
+
+That last one is the reason any of this exists. Run it yourself:
+
+```bash
+./build-examples.sh dist
+python verify_artifacts.py --dist dist
+```
+
+It found the ZX Spectrum load-address bug — both shipped `.TAP` files were
+assembled past the top of RAM and could not load on any Spectrum.
 
 ## Why comparing text is not enough
 

@@ -2,10 +2,10 @@
 
 ### Requirements
 
-- Python 3.8+
-- PyTorch
+- Python 3.10+ (CI tests 3.10 through 3.13)
+- PyTorch — for training only; building and testing need just NumPy
 - NumPy
-- CP/M Z80 emulator for testing
+- No emulator needed: `libz80emu.py` runs the generated code in-process
 
 ```bash
 # Train on included conversation data

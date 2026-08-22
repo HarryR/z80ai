@@ -81,7 +81,6 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     layer_names, layer_sizes = discover_layers(params)
     num_layers = len(layer_names)
 
-    input_size = layer_sizes[0]
     output_size = layer_sizes[-1]
     if output_size < 2:
         raise ValueError("charset must have at least two entries")

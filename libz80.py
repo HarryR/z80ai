@@ -260,7 +260,6 @@ class Z80Builder:
     def or_a(self): self.emit(0xB7)
     def xor_a(self): self.emit(0xAF)
     def cp_n(self, val): self.emit(0xFE, val & 0xFF)
-    def add_hl_de(self): self.emit(0x19)
     def sbc_hl_de(self): self.emit(0xED, 0x52)
     def sbc_hl_bc(self): self.emit(0xED, 0x42)  # SBC HL,BC
     def inc_bc(self): self.emit(0x03)

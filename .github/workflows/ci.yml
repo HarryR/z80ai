@@ -8,95 +8,135 @@ on:
   # Unfiltered, so pull requests stacked on other feature branches are tested
   # too, not only those targeting main.
   pull_request:
+  workflow_dispatch:
+
+# Least privilege by default; the release job opts back up to contents: write.
+permissions:
+  contents: read
+
+# A new push to a PR makes the in-flight run pointless. Pushes to main and tags
+# are left alone so no release run is ever cancelled halfway through.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DEFAULT_PYTHON: '3.12'
 
 jobs:
-  test:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: ${{ env.DEFAULT_PYTHON }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
-        run: pip install numpy pytest
+        run: pip install -r requirements-dev.txt
+
+      # Gated: syntax errors, undefined names, broken comparisons. See ruff.toml.
+      - name: Check for defects
+        run: ruff check --output-format=github .
+
+      # Not gated: the wider default rule set flags pre-existing style debt.
+      # Surfacing it keeps it visible without blocking a merge on it.
+      - name: Style report
+        if: always()
+        run: |
+          {
+            echo '### Lint debt (not gated)'
+            echo
+            echo '```'
+            ruff check --select E,W,F,B,SIM,UP,I,RUF,PERF --statistics . || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      # One version failing should not hide the result on the others.
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
 
       - name: Run test suite
-        run: pytest -q
+        run: pytest -q --durations=5
 
   build:
-    needs: test
+    name: Build and verify artifacts
+    needs: [lint, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: ${{ env.DEFAULT_PYTHON }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
-        run: pip install numpy
+        run: pip install -r requirements-dev.txt
 
-      - name: Create dist directory
-        run: mkdir -p dist
+      - name: Build every example for every target
+        run: ./build-examples.sh dist
 
-      - name: Build guess example (CP/M standard)
+      # The build scripts are pure functions of the model file. If two runs
+      # disagree, something has picked up dict ordering, a timestamp or a hash
+      # seed, and released binaries would stop matching what anyone can rebuild.
+      - name: Check builds are reproducible
         run: |
-          python3 buildz80com.py \
-            --model examples/guess/model.npz \
-            --output dist/GUESS.COM
+          ./build-examples.sh dist-repeat > /dev/null
+          for artifact in dist/*; do
+            cmp "$artifact" "dist-repeat/$(basename "$artifact")" \
+              || { echo "::error::$(basename "$artifact") is not reproducible"; exit 1; }
+          done
+          echo "All artifacts are byte-identical across two builds"
+          rm -rf dist-repeat
 
-      - name: Build guess example (CP/M fast)
+      # The point of the whole exercise: a binary that assembles but computes
+      # the wrong answer must not reach a release.
+      - name: Verify artifacts against the reference model
+        run: python verify_artifacts.py --dist dist --query HELLO
+
+      - name: Report artifact sizes
+        if: always()
         run: |
-          python3 buildfastz80com.py \
-            --model examples/guess/model.npz \
-            --output dist/GUESS-FAST.COM
-
-      - name: Build guess example (ZX Spectrum TAP)
-        run: |
-          python3 buildz80tap.py \
-            --model examples/guess/model.npz \
-            --output dist/GUESS.TAP
-
-      - name: Build tinychat example (CP/M standard)
-        run: |
-          python3 buildz80com.py \
-            --model examples/tinychat/model.npz \
-            --output dist/CHAT.COM
-
-      - name: Build tinychat example (CP/M fast)
-        run: |
-          python3 buildfastz80com.py \
-            --model examples/tinychat/model.npz \
-            --output dist/CHAT-FAST.COM
-
-      - name: Build tinychat example (ZX Spectrum TAP)
-        run: |
-          python3 buildz80tap.py \
-            --model examples/tinychat/model.npz \
-            --output dist/CHAT.TAP
-
-      - name: Build guess example (Agon eZ80)
-        run: |
-          python3 buildez80.py \
-            --model examples/guess/model.npz \
-            --output dist/GUESS.bin
-
-      - name: Build tinychat example (Agon eZ80)
-        run: |
-          python3 buildez80.py \
-            --model examples/tinychat/model.npz \
-            --output dist/CHAT.bin
-
-      - name: List built artifacts
-        run: ls -la dist/
+          {
+            echo '### Artifact sizes'
+            echo
+            echo '| artifact | bytes | KB |'
+            echo '|---|---:|---:|'
+            for artifact in dist/*; do
+              size=$(wc -c < "$artifact")
+              awk -v n="$(basename "$artifact")" -v s="$size" \
+                'BEGIN { printf "| `%s` | %s | %.1f |\n", n, s, s / 1024 }'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -104,11 +144,14 @@ jobs:
           name: z80-binaries
           path: dist/
           retention-days: 7
+          if-no-files-found: error
 
   release:
+    name: Release
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    timeout-minutes: 10
 
     permissions:
       contents: write
@@ -132,4 +175,5 @@ jobs:
             dist/CHAT-FAST.COM
             dist/CHAT.TAP
             dist/CHAT.bin
+          fail_on_unmatched_files: true
           generate_release_notes: true
