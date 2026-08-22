@@ -43,9 +43,8 @@ the bytes.
 | `test_encoders.py` | Trigram/context hashing against an independent restatement of the spec |
 | `test_kernels.py` | Emulator memory vs. reference, value by value: tokenizer buckets, context buckets, output logits |
 | `test_end_to_end.py` | Generated text from all three Z80 targets vs. the reference |
-| `test_ez80.py` | ADL encoding, the Agon header, and the same numeric comparisons for the eZ80 |
 | `test_builders.py` | TAP container layout, TPA size limits, embedded weight/bias/charset data |
-| `test_build_frontend.py` | Automatic target selection and layer-size validation |
+| `test_model_shapes.py` | Layer discovery order, and the widths a Z80 backend can actually assemble |
 
 ## Why comparing text is not enough
 
@@ -61,9 +60,3 @@ tests — the `MULADD` borrow and the packed-weight row desync — produced corr
 End-to-end tests use a synthetic 256→16→12 model and generate 8 characters, so a
 full forward pass is a few hundred thousand emulated instructions rather than a
 few million. The shipped examples are covered by the `slow`-marked tests.
-
-To time a target rather than check it:
-
-```bash
-python bench.py --model examples/guess/model.npz --target com fast ez80
-```

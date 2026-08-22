@@ -65,6 +65,8 @@ For building from source or training your own models, see [TRAINING.md](TRAINING
 - **Autoregressive generation**: Outputs text character-by-character
 - **No floating point**: Everything is integer math with fixed-point scaling
 - **Interactive chat mode**: Just run `CHAT` with no arguments
+- **Tested against a real CPU emulator**: every build is executed instruction by
+  instruction and compared to a NumPy reference model - see [TESTING.md](TESTING.md)
 
 ## Platform Support
 
@@ -167,15 +169,18 @@ MULADD:
 NEG:
     cp 0FFh
     jr z, NEG1       ; weight=-1
-    ; weight=-2: subtract twice
+    ; weight=-2: subtract twice, clearing carry before each
     ld hl, (ACC)
+    or a
     sbc hl, de
+    or a             ; the SBC above may have borrowed
     sbc hl, de
     ld (ACC), hl
     ret
 NEG1:
     ; weight=-1: subtract once
     ld hl, (ACC)
+    or a
     sbc hl, de
     ld (ACC), hl
     ret
@@ -191,6 +196,34 @@ rr l         ; ACC = ACC / 4
 ```
 
 That's the entire neural network: unpack weight, multiply-accumulate, shift. Repeat ~100K times per character generated.
+
+## Recent fixes
+
+Building the emulator-backed test suite surfaced four bugs in the generated
+code. If you have an older build, rebuild it:
+
+- **`MULADD` borrow** (`buildz80com.py`, `buildz80tap.py`) — a weight of `-2` was
+  applied as two consecutive `SBC HL,DE` without clearing carry in between, so
+  every `-2` weight subtracted one too many whenever the first subtraction
+  borrowed. Affected every inference on both CP/M and ZX builds.
+- **ZX Spectrum keyboard** (`buildz80tap.py`) — the buffer-full check did
+  `PUSH AF / CP B / POP AF / JR NC`, and `POP AF` restored the flags from
+  *before* the compare. `JR NC` therefore tested the preceding `CP 32`, which is
+  never carry for a printable character, so every keystroke was discarded. The
+  `.TAP` build could not accept input at all.
+- **Packed-weight row alignment** — weights were packed as one flat stream while
+  the unpack loop reloads a byte at every 4th weight *of each neuron*. Any layer
+  whose input width was not a multiple of four desynchronised from row 1 onward.
+- **`align()`** — `if overage < boundary` is always true, so aligning an
+  already-aligned address inserted a whole extra boundary of padding.
+
+Two more in the Python:
+
+- `feedme.AutoregressiveModel._forward_int` truncated toward zero when shifting
+  down; `SRA H / RR L` floors. The reported integer accuracy was optimistic for
+  every negative accumulator.
+- Layers were discovered with a lexical sort, so a model with ten or more layers
+  would have run `fc10` immediately after `fc1`.
 
 ---
 
