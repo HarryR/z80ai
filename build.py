@@ -16,6 +16,18 @@ only if the result would overrun the transient program area. That is the choice
 you want almost every time, and it is what buildfastz80com.py's own header
 asked for.
 
+The eZ80 target applies the same fastest-that-fits policy to its own two
+kernels:
+
+  row      every weight unrolled into straight-line code, so the ~73% that are
+           zero cost nothing. Ten times fewer instructions, 1.7x the size.
+  compact  a weight stream walked at runtime. Slow, but its size does not
+           depend on the model, so it is the only option for a model too large
+           to unroll.
+
+`--target ez80` chooses between them against the 512KB a real Agon has - not
+the 16MB ADL can address. `ez80-row` and `ez80-compact` force one.
+
 Usage:
     python build.py --model examples/guess/model.npz --output GUESS.COM
     python build.py --model model.npz --target zx  --output CHAT.TAP
@@ -64,10 +76,17 @@ def build_zx(model: str, max_output_len: int) -> tuple[Z80Builder, str]:
     return buildz80tap.build_autoreg(model, max_output_len=max_output_len), "packed"
 
 
-def build_ez80(model: str, max_output_len: int) -> tuple[Z80Builder, str]:
+def build_ez80(model: str, max_output_len: int,
+               kernel: str = "auto") -> tuple[Z80Builder, str]:
+    """Build an Agon .bin, choosing the fastest kernel that fits Agon SRAM."""
     import buildez80
 
-    return buildez80.build_autoreg(model, max_output_len=max_output_len), "bytes"
+    builder = buildez80.build_autoreg(
+        model, max_output_len=max_output_len, kernel=kernel
+    )
+    # Which kernel `auto` settled on is visible in the labels: only the compact
+    # one emits a weight stream.
+    return builder, "compact" if "WTS1" in builder.labels else "row"
 
 
 def main() -> None:
@@ -77,7 +96,8 @@ def main() -> None:
                         help="Model file to load (.npz or .pt)")
     parser.add_argument("--output", "-o", required=True, help="Output file")
     parser.add_argument("--target", "-t", default="auto",
-                        choices=["auto", "cpm", "cpm-fast", "cpm-packed", "zx", "ez80"],
+                        choices=["auto", "cpm", "cpm-fast", "cpm-packed", "zx",
+                                 "ez80", "ez80-row", "ez80-compact"],
                         help="Platform and weight layout (default: auto = cpm)")
     parser.add_argument("--max-output-len", type=int, default=50,
                         help="Maximum characters generated per response")
@@ -93,7 +113,8 @@ def main() -> None:
     elif target == "zx":
         builder, layout = build_zx(args.model, args.max_output_len)
     else:
-        builder, layout = build_ez80(args.model, args.max_output_len)
+        kernel = target.split("-", 1)[1] if "-" in target else "auto"
+        builder, layout = build_ez80(args.model, args.max_output_len, kernel)
 
     if target == "zx":
         import buildz80tap

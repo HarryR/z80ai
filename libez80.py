@@ -19,6 +19,15 @@ from libz80 import Z80Builder, _disp
 # Agon MOS loads .bin programs here and enters at the first byte.
 AGON_LOAD_ADDR = 0x040000
 
+# ADL mode addresses 16MB, but that is address space, not memory.  A shipping
+# Agon has 512KB of SRAM at 0x040000-0x0BFFFF and MOS puts the stack at the top
+# of it, so this - not 16MB - is what actually bounds a model's size.
+AGON_SRAM_TOP = 0x0C0000
+AGON_STACK_MARGIN = 0x1000
+
+#: Largest image that will load and still leave MOS its stack.
+AGON_MAX_IMAGE = AGON_SRAM_TOP - AGON_STACK_MARGIN - AGON_LOAD_ADDR
+
 
 class EZ80Builder(Z80Builder):
     """Emits eZ80 machine code for ADL (24-bit) mode."""

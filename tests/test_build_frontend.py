@@ -31,3 +31,25 @@ def test_fits_in_tpa_leaves_room_for_the_stack(tiny_model_path):
     assert build._fits_in_tpa(builder) == (
         end + build.CPM_STACK_MARGIN <= build.CPM_TPA_TOP
     )
+
+
+def test_ez80_auto_picks_the_unrolled_kernel_when_it_fits(tiny_model_path):
+    _builder, layout = build.build_ez80(tiny_model_path, max_output_len=4)
+    assert layout == "row"
+
+
+def test_ez80_auto_falls_back_to_compact_when_unrolling_would_not_fit(
+    monkeypatch, tiny_model_path
+):
+    """Shrink the ceiling rather than build a model big enough to overrun it."""
+    import buildez80
+
+    monkeypatch.setattr(buildez80, "AGON_MAX_IMAGE", 8 * 1024)
+    _builder, layout = build.build_ez80(tiny_model_path, max_output_len=4)
+    assert layout == "compact"
+
+
+def test_ez80_explicit_kernels_are_honoured(tiny_model_path):
+    _, row = build.build_ez80(tiny_model_path, 4, kernel="row")
+    _, compact = build.build_ez80(tiny_model_path, 4, kernel="compact")
+    assert (row, compact) == ("row", "compact")

@@ -22,18 +22,13 @@ import os
 import sys
 
 import libinfer
+from libez80 import AGON_LOAD_ADDR as AGON_LOAD
+from libez80 import AGON_SRAM_TOP, AGON_STACK_MARGIN
 from libhost import run_agon, run_cpm, run_zx
 
 CPM_TPA = 0x0100
 CPM_TPA_TOP = 0xE400  # where a stock CP/M 2.2 BDOS starts
 ZX_RAM_TOP = 0x10000  # one past the last byte of RAM on a 48K machine
-AGON_LOAD = 0x040000
-# ADL mode addresses 16MB, but that is address space, not RAM: a shipping Agon
-# has 512KB of SRAM at 0x040000-0x0BFFFF and MOS puts the stack at the top of
-# it. Checking against the 16MB bound passes images no real machine can load,
-# and the emulator's 8MB will not notice either.
-AGON_SRAM_TOP = 0x0C0000
-AGON_STACK_MARGIN = 0x1000
 
 #: artifact name -> (model path, platform)
 ARTIFACTS = {

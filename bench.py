@@ -25,12 +25,15 @@ import importlib
 
 from libhost import AgonHost, CPMHost, ZXHost
 
-# module, description, clock Hz, is an eZ80 target
+# module, description, clock Hz, is an eZ80 target, extra build_autoreg kwargs
 TARGETS = {
-    "com": ("buildz80com", "CP/M, packed 2-bit weights", 4_000_000, False),
-    "fast": ("buildfastz80com", "CP/M, per-value index lists", 4_000_000, False),
-    "tap": ("buildz80tap", "ZX Spectrum, packed weights", 3_500_000, False),
-    "ez80": ("buildez80", "Agon eZ80, one byte per weight", 18_432_000, True),
+    "com": ("buildz80com", "CP/M, packed 2-bit weights", 4_000_000, False, {}),
+    "fast": ("buildfastz80com", "CP/M, per-value index lists", 4_000_000, False, {}),
+    "tap": ("buildz80tap", "ZX Spectrum, packed weights", 3_500_000, False, {}),
+    "ez80-compact": ("buildez80", "Agon eZ80, one byte per weight",
+                     18_432_000, True, {"kernel": "compact"}),
+    "ez80": ("buildez80", "Agon eZ80, unrolled weight-major",
+             18_432_000, True, {"kernel": "row"}),
 }
 
 
@@ -38,7 +41,7 @@ def _host(target: str, query: str, org: int) -> AgonHost | CPMHost | ZXHost:
     """Build the host for ``target``, loading at the address the build uses."""
     if target == "tap":
         return ZXHost(stdin=[query, "!"], org=org)
-    if target == "ez80":
+    if TARGETS[target][3]:
         return AgonHost(stdin=[query, "!"])
     return CPMHost(cmdline=query)
 
@@ -46,7 +49,7 @@ def _host(target: str, query: str, org: int) -> AgonHost | CPMHost | ZXHost:
 def measure(target: str, model_path: str, query: str = "HELLO") -> dict:
     """Cycle and instruction counts for one forward pass of ``target``."""
     module = importlib.import_module(TARGETS[target][0])
-    builder = module.build_autoreg(model_path, max_output_len=1)
+    builder = module.build_autoreg(model_path, max_output_len=1, **TARGETS[target][4])
     image = builder.build()
 
     # Always take the load address from the builder: hardcoding it here meant
@@ -89,9 +92,10 @@ def main() -> None:
     rows = [measure(t, args.model, args.query) for t in args.target]
     baseline = rows[0]["instructions"]
 
-    print(f"\n{'target':8} {'size':>9} {'instructions':>13} {'speedup':>8} "
+    width = max(8, *(len(row["target"]) for row in rows))
+    print(f"\n{'target':{width}} {'size':>9} {'instructions':>13} {'speedup':>8} "
           f"{'Z80 T-states':>14} {'sec @ clock':>12}")
-    print("-" * 70)
+    print("-" * (width + 62))
     for row in rows:
         speedup = baseline / row["instructions"]
         if row["is_ez80"]:
@@ -100,7 +104,7 @@ def main() -> None:
             cycles = f"{row['tstates']:,}"
             seconds = f"{row['tstates'] / row['clock']:.2f}"
         print(
-            f"{row['target']:8} {row['bytes']:9,} {row['instructions']:13,} "
+            f"{row['target']:{width}} {row['bytes']:9,} {row['instructions']:13,} "
             f"{speedup:7.2f}x {cycles:>14} {seconds:>12}"
         )
     print("\nspeedup is relative to the first target listed, by instruction count.")

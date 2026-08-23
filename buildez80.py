@@ -5,14 +5,26 @@ Build an eZ80 (ADL mode) binary for Agon Light / Console8 and friends.
 The Z80 builds spend most of their effort working around 64KB: weights are
 squeezed to two bits, activations to 16 bits, and layers are capped at 256
 neurons because DJNZ counts in a byte.  An eZ80 in ADL mode has a 24-bit
-address space - up to 16MB - so this backend drops those compromises:
+address space, so this backend drops those compromises: 24-bit accumulators
+(the 16-bit overflow the QAT loss trains against cannot happen at all), 24-bit
+activations, and no byte counters anywhere, so layers may be any width.
 
-  * one byte per weight, so there is no unpacking work in the inner loop
-  * 24-bit accumulators, so the 16-bit overflow the QAT loss trains against
-    cannot happen at all
-  * 24-bit activations, so nothing has to be re-scaled between layers
-  * neuron and layer counts terminated by sentinels rather than byte counters,
-    so layers may be any width
+Two kernels, chosen by size (``--kernel``, default ``auto``):
+
+  row      Every weight becomes code.  ``LD DE,(nnnnnn)`` reaches any
+           activation in one instruction, so a nonzero weight costs a load and
+           an add - and a zero weight, which is about 73% of them, costs
+           nothing at all.  Ten times fewer instructions than `compact` for
+           roughly 1.7x the size.  This is what the address space actually
+           buys; an index list would still have to turn each index into an
+           address, and the accumulator is in HL so `LD DE,(HL)` is unavailable.
+  compact  One signed byte per weight, walked at runtime, neurons and layers
+           closed by sentinels.  Visits every weight including the zeros, so it
+           is slow, but its size does not depend on the model - which makes it
+           the only option once a model is too large to unroll.
+
+`auto` takes the first kernel whose image fits in Agon SRAM.  Note that ADL
+addresses 16MB but a shipping Agon has 512KB, and that is the real ceiling.
 
 Inference is otherwise identical to the Z80 version: the same trigram hashing,
 the same {-2,-1,0,+1} weights, the same >>2 per layer, the same argmax.  A
@@ -28,8 +40,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from libez80 import AGON_LOAD_ADDR, EZ80Builder, agon_header
-from libinfer import discover_layers
+from libez80 import AGON_LOAD_ADDR, AGON_MAX_IMAGE, EZ80Builder, agon_header
+from libinfer import SHIFT, discover_layers
 from loadmodel import load_model_params
 
 MAX_OUTPUT_LEN = 50
@@ -67,10 +79,236 @@ def encode_biases(biases: np.ndarray) -> bytes:
     return bytes(out)
 
 
+def neuron_ops(row: np.ndarray) -> list[tuple[int, int]]:
+    """``[(column, weight)]`` for each nonzero weight, in ascending column order.
+
+    The unrolled kernels turn this into straight-line code, so a zero weight
+    costs nothing at all rather than a load and a branch.  About 73% of a
+    trained model's weights are zero, which is where most of the speedup comes
+    from.
+
+    Ascending order is not an optimization - it is what keeps the build
+    byte-reproducible.  Never iterate a set or a dict to produce this.
+    """
+    w = np.clip(np.asarray(row), -2, 1).astype(np.int8)
+    return [(int(j), int(w[j])) for j in np.nonzero(w)[0]]
+
+
+def layer_buffers(index: int, num_layers: int) -> tuple[str, str]:
+    """(input buffer, output buffer) for layer ``index``, ping-ponging A/B."""
+    in_buf = 'INBUF' if index == 0 else ('BUF_A' if index % 2 == 1 else 'BUF_B')
+    out_buf = 'OUTBUF' if index == num_layers - 1 else (
+        'BUF_A' if (index + 1) % 2 == 1 else 'BUF_B'
+    )
+    return in_buf, out_buf
+
+
+def _emit_layer_compact(b: EZ80Builder) -> None:
+    """The data-driven kernel: one pass over a sentinel-terminated weight stream.
+
+    Slow - it visits every weight, including the ~73% that are zero - but its
+    size is independent of the model, so it is the only option once a model is
+    too large to unroll.
+
+        BC  weight stream (one signed byte per weight, sentinel terminated)
+        SP  input pointer - POP reads a 24-bit activation and advances in one go
+        HL  24-bit accumulator
+        IX  output pointer
+    """
+    b.label('LAYER')
+    b.ld_mem_label_sp('SPSAV')
+    b.di()
+
+    b.label('LNEUR')
+    b.ld_sp_mem_label('INBASE')
+    b.ld_hl_nn(0)
+
+    b.label('LWT')
+    b.pop_de()          # DE = next activation
+    b.ld_a_bc()         # A  = next weight
+    b.inc_bc()
+    b.or_a()
+    b.jr_z('LWT')       # weight 0: nothing to add (the common case)
+    b.jp_m('LNEG')
+    b.dec_a()
+    b.jr_nz('LEND')     # sentinel: end of this neuron
+    b.add_hl_de()       # weight +1
+    b.jr('LWT')
+
+    b.label('LNEG')
+    b.or_a()            # clear carry before each SBC
+    b.sbc_hl_de()
+    b.inc_a()
+    b.jr_z('LWT')       # weight -1
+    b.or_a()
+    b.sbc_hl_de()       # weight -2
+    b.jr('LWT')
+
+    b.label('LEND')
+    # Bias, read through SP so all 24 bits land in DE at once.
+    b.ld_sp_mem_label('BIASP')
+    b.pop_de()
+    b.ld_mem_label_sp('BIASP')
+    b.add_hl_de()
+
+    # Arithmetic shift right by 2 across all three bytes.
+    b.ld_mem_label_hl('TMP0')
+    for _ in range(SHIFT):
+        b.ld_hl_label('TMP2')
+        b.sra_hl_ind()
+        b.dec_hl()
+        b.rr_hl_ind()
+        b.dec_hl()
+        b.rr_hl_ind()
+
+    b.ld_a_mem_label('RELUF')
+    b.or_a()
+    b.jr_z('NORELU')
+    b.ld_a_mem_label('TMP2')
+    b.or_a()
+    b.jp_p('NORELU')
+    b.xor_a()
+    b.ld_mem_label_a('TMP0')
+    b.ld_mem_label_a('TMP1')
+    b.ld_mem_label_a('TMP2')
+
+    b.label('NORELU')
+    b.ld_a_mem_label('TMP0')
+    b.ld_ixd_a(0)
+    b.ld_a_mem_label('TMP1')
+    b.ld_ixd_a(1)
+    b.ld_a_mem_label('TMP2')
+    b.ld_ixd_a(2)
+    b.inc_ix()
+    b.inc_ix()
+    b.inc_ix()
+
+    b.ld_a_bc()
+    b.cp_n(W_END_LAYER)
+    b.jp_nz('LNEUR')
+
+    b.inc_bc()
+    b.ld_sp_mem_label('SPSAV')
+    b.ei()
+    b.ret()
+
+
+def _emit_neuron_epilogue(b: EZ80Builder) -> None:
+    """Finish one neuron: fold the bias, shift, ReLU, store, advance.
+
+    Called once per neuron by the unrolled kernel, which arrives with
+
+        IX  sum of activations whose weight is +1
+        HL  sum of activations whose weight is -1, counted twice for -2
+        DE  the neuron's bias, pre-negated at build time
+        IY  where this neuron's output goes
+
+    so the value wanted is ``IX - (HL - (-DE))``.  Splitting the sum this way
+    is exact, not an approximation: the reference wraps the accumulator to 24
+    bits, addition mod 2**24 is associative and commutative, so regrouping the
+    addends cannot change the result.  What must *not* move is the >>2 - it
+    floors, so it is a nonlinearity rather than a scale factor.
+    """
+    for label, relu in (('NEUREND', True), ('NEUREND_OUT', False)):
+        b.label(label)
+        b.add_hl_de()       # HL = sum(neg) - bias
+        b.push_ix()
+        b.pop_de()          # DE = sum(pos)
+        b.ex_de_hl()
+        b.ld_ix_nn(0)       # reset the positive accumulator; leaves flags alone
+        b.or_a()
+        b.sbc_hl_de()       # HL = sum(pos) - sum(neg) + bias, S = bit 23
+        if relu:
+            # A negative accumulator relus to zero whatever the shift does to
+            # it, so the whole shift chain can be skipped.  Roughly 60-75% of
+            # hidden neurons take this path.
+            b.jp_m('NE_ZERO')
+        b.jp('NE_STORE')
+
+    b.label('NE_STORE')
+    b.ld_mem_label_hl('TMP0')
+    for _ in range(SHIFT):
+        b.ld_hl_label('TMP2')
+        b.sra_hl_ind()
+        b.dec_hl()
+        b.rr_hl_ind()
+        b.dec_hl()
+        b.rr_hl_ind()
+    for k, name in enumerate(('TMP0', 'TMP1', 'TMP2')):
+        b.ld_a_mem_label(name)
+        b.ld_iyd_a(k)
+    b.jp('NE_ADV')
+
+    b.label('NE_ZERO')
+    b.xor_a()
+    for k in range(3):
+        b.ld_iyd_a(k)
+
+    b.label('NE_ADV')
+    b.ld_hl_nn(0)           # reset the negative accumulator
+    b.ld_de_nn(3)
+    b.add_iy_de()
+    b.ret()
+
+
+def _emit_layers_unrolled(b: EZ80Builder, params: dict, layer_names: list[str],
+                          num_layers: int) -> None:
+    """Emit every layer as straight-line code, one instruction pair per weight.
+
+    With a 24-bit address space ``LD DE,(nnnnnn)`` reaches any activation in
+    one instruction, so a nonzero weight costs a load and an add and a zero
+    weight costs nothing.  That is what 16MB buys here; an index list would
+    still have to turn each index into an address.
+
+    Nothing in this region may use JR: it is a quarter of a megabyte long and
+    every relative jump would be out of range.
+    """
+    for i, name in enumerate(layer_names):
+        in_buf, out_buf = layer_buffers(i, num_layers)
+        weights = np.clip(np.asarray(params[f'{name}_weight']), -2, 1)
+        biases = np.asarray(params[f'{name}_bias']).astype(np.int64)
+        epilogue = 'NEUREND_OUT' if i == num_layers - 1 else 'NEUREND'
+
+        b.label(f'LAYER{i+1}')
+        b.ld_iy_label(out_buf)
+        b.ld_hl_nn(0)
+        b.ld_ix_nn(0)
+
+        for row, bias in zip(weights, biases, strict=True):
+            for col, weight in neuron_ops(row):
+                b.ld_de_mem_label(in_buf, 3 * col)
+                if weight == 1:
+                    b.add_ix_de()
+                else:
+                    b.add_hl_de()
+                    if weight == -2:
+                        b.add_hl_de()
+            b.ld_de_nn((-int(bias)) & 0xFFFFFF)
+            b.call(epilogue)
+    b.ret()
+
+
+#: Kernels this backend can emit, fastest first.  See the module docstring.
+KERNELS = ('row', 'compact')
+
+
 def build_autoreg(model_path: str = 'command_model_autoreg.pt',
                   max_output_len: int = MAX_OUTPUT_LEN,
-                  org: int = AGON_LOAD_ADDR) -> EZ80Builder:
-    """Build the eZ80 autoregressive inference binary."""
+                  org: int = AGON_LOAD_ADDR,
+                  kernel: str = 'auto') -> EZ80Builder:
+    """Build the eZ80 autoregressive inference binary.
+
+    ``kernel`` selects how the layers are emitted; see :data:`KERNELS`.  The
+    default, ``'auto'``, takes the fastest kernel whose image still fits in
+    Agon SRAM, which is the same fastest-that-fits policy build.py already
+    applies to the CP/M target.
+    """
+    if kernel == 'auto':
+        return _build_fastest_that_fits(model_path, max_output_len, org)
+    if kernel not in KERNELS:
+        raise ValueError(
+            f"unknown kernel {kernel!r}; choose from {['auto', *KERNELS]}"
+        )
     print(f"Loading model from {model_path}...")
     params, _arch, charset = load_model_params(model_path)
 
@@ -87,8 +325,13 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
 
     print(f"Architecture: {' → '.join(map(str, layer_sizes))}")
 
-    weight_blobs = [encode_weights(params[f'{n}_weight']) for n in layer_names]
-    bias_blob = b''.join(encode_biases(params[f'{n}_bias']) for n in layer_names)
+    # The unrolled kernels bake the weights into the code, so only the compact
+    # one needs a weight stream and a bias table in the data section.
+    if kernel == 'compact':
+        weight_blobs = [encode_weights(params[f'{n}_weight']) for n in layer_names]
+        bias_blob = b''.join(encode_biases(params[f'{n}_bias']) for n in layer_names)
+    else:
+        weight_blobs, bias_blob = [], b''
 
     b = EZ80Builder(org=org)
     agon_header(b, 'START')
@@ -220,105 +463,31 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     # Buffers ping-pong; the assignment is fixed at build time so the layer
     # setup is unrolled rather than table-driven.
     b.label('INFER')
-    b.ld_hl_label('BIASES')
-    b.ld_mem_label_hl('BIASP')
+    if kernel == 'compact':
+        b.ld_hl_label('BIASES')
+        b.ld_mem_label_hl('BIASP')
 
-    for i in range(num_layers):
-        in_buf = 'INBUF' if i == 0 else ('BUF_A' if i % 2 == 1 else 'BUF_B')
-        out_buf = 'OUTBUF' if i == num_layers - 1 else (
-            'BUF_A' if (i + 1) % 2 == 1 else 'BUF_B'
-        )
-        b.label(f'LAYER{i+1}')
-        b.ld_hl_label(in_buf)
-        b.ld_mem_label_hl('INBASE')
-        b.ld_ix_label(out_buf)
-        b.ld_bc_label(f'WTS{i+1}')
-        b.ld_a_n(0 if i == num_layers - 1 else 1)
-        b.ld_mem_label_a('RELUF')
-        b.call('LAYER')
-    b.ret()
+        for i in range(num_layers):
+            in_buf, out_buf = layer_buffers(i, num_layers)
+            b.label(f'LAYER{i+1}')
+            b.ld_hl_label(in_buf)
+            b.ld_mem_label_hl('INBASE')
+            b.ld_ix_label(out_buf)
+            b.ld_bc_label(f'WTS{i+1}')
+            b.ld_a_n(0 if i == num_layers - 1 else 1)
+            b.ld_mem_label_a('RELUF')
+            b.call('LAYER')
+        b.ret()
+    else:
+        # The unrolled layers are emitted last, after every JR-using routine,
+        # so a quarter of a megabyte of straight-line code cannot put any
+        # relative jump out of range.
+        b.jp('LAYER1')
 
     # === LAYER ===============================================================
-    # BC  weight stream (one signed byte per weight, sentinel terminated)
-    # SP  input pointer - POP reads a 24-bit activation and advances in one go
-    # HL  24-bit accumulator
-    # IX  output pointer
-    b.label('LAYER')
-    b.ld_mem_label_sp('SPSAV')
-    b.di()
+    if kernel == 'compact':
+        _emit_layer_compact(b)
 
-    b.label('LNEUR')
-    b.ld_sp_mem_label('INBASE')
-    b.ld_hl_nn(0)
-
-    b.label('LWT')
-    b.pop_de()          # DE = next activation
-    b.ld_a_bc()         # A  = next weight
-    b.inc_bc()
-    b.or_a()
-    b.jr_z('LWT')       # weight 0: nothing to add (the common case)
-    b.jp_m('LNEG')
-    b.dec_a()
-    b.jr_nz('LEND')     # sentinel: end of this neuron
-    b.add_hl_de()       # weight +1
-    b.jr('LWT')
-
-    b.label('LNEG')
-    b.or_a()            # clear carry before each SBC
-    b.sbc_hl_de()
-    b.inc_a()
-    b.jr_z('LWT')       # weight -1
-    b.or_a()
-    b.sbc_hl_de()       # weight -2
-    b.jr('LWT')
-
-    b.label('LEND')
-    # Bias, read through SP so all 24 bits land in DE at once.
-    b.ld_sp_mem_label('BIASP')
-    b.pop_de()
-    b.ld_mem_label_sp('BIASP')
-    b.add_hl_de()
-
-    # Arithmetic shift right by 2 across all three bytes.
-    b.ld_mem_label_hl('TMP0')
-    for _ in range(2):
-        b.ld_hl_label('TMP2')
-        b.sra_hl_ind()
-        b.dec_hl()
-        b.rr_hl_ind()
-        b.dec_hl()
-        b.rr_hl_ind()
-
-    b.ld_a_mem_label('RELUF')
-    b.or_a()
-    b.jr_z('NORELU')
-    b.ld_a_mem_label('TMP2')
-    b.or_a()
-    b.jp_p('NORELU')
-    b.xor_a()
-    b.ld_mem_label_a('TMP0')
-    b.ld_mem_label_a('TMP1')
-    b.ld_mem_label_a('TMP2')
-
-    b.label('NORELU')
-    b.ld_a_mem_label('TMP0')
-    b.ld_ixd_a(0)
-    b.ld_a_mem_label('TMP1')
-    b.ld_ixd_a(1)
-    b.ld_a_mem_label('TMP2')
-    b.ld_ixd_a(2)
-    b.inc_ix()
-    b.inc_ix()
-    b.inc_ix()
-
-    b.ld_a_bc()
-    b.cp_n(W_END_LAYER)
-    b.jp_nz('LNEUR')
-
-    b.inc_bc()
-    b.ld_sp_mem_label('SPSAV')
-    b.ei()
-    b.ret()
 
     # === ARGMAX ==============================================================
     # First-wins argmax over OUTBUF, matching libinfer.argmax.
@@ -604,6 +773,13 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.ld_hl_label('CTXBUF')
     b.jp('BUCKET_ADD')
 
+    # === UNROLLED LAYERS =====================================================
+    # Emitted after every routine that uses JR, because from here on the code
+    # is far too long for a relative jump to reach across.
+    if kernel != 'compact':
+        _emit_neuron_epilogue(b)
+        _emit_layers_unrolled(b, params, layer_names, num_layers)
+
     # === DATA ================================================================
     b.label('CHARTBL')
     for c in charset:
@@ -634,33 +810,70 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.label('INPBUF')
     b.ds(MAX_INPUT_LEN + 1)
 
-    # Activation buffers: 24-bit values, three bytes of slack because the
-    # inner loop pops one activation past the last weight.
+    # Activation buffers: 24-bit values.  The compact kernel pops one
+    # activation past the last weight, so it needs three bytes of slack; the
+    # unrolled kernels address exactly the elements they use and need none.
+    slack = 3 if kernel == 'compact' else 0
     b.label('INBUF')
     b.ds(NUM_BUCKETS * 3)
     b.label('CTXBUF')
     b.ds(NUM_BUCKETS * 3)
-    b.ds(3)
+    b.ds(slack)
 
     hidden = layer_sizes[1:-1] or [layer_sizes[-1]]
     max_hidden = max(hidden)
     b.label('BUF_A')
-    b.ds(max_hidden * 3 + 3)
+    b.ds(max_hidden * 3 + slack)
     b.label('BUF_B')
-    b.ds(max_hidden * 3 + 3)
+    b.ds(max_hidden * 3 + slack)
     b.label('OUTBUF')
     b.ds(output_size * 3)
     b.label('OUTEND')
     b.ds(3)
 
-    b.label('BIASES')
-    b.blob(bias_blob)
+    if kernel == 'compact':
+        b.label('BIASES')
+        b.blob(bias_blob)
+        for i, blob in enumerate(weight_blobs, start=1):
+            b.label(f'WTS{i}')
+            b.blob(blob)
 
-    for i, blob in enumerate(weight_blobs, start=1):
-        b.label(f'WTS{i}')
-        b.blob(blob)
+    # Layer 0 reads a 256-long input vector through the INBUF label alone, so
+    # the context half must sit immediately after the query half.  Today that
+    # holds because of the order of the two `ds` calls above; assert it rather
+    # than leave the unrolled offsets depending on an accident of layout.
+    assert b.labels['CTXBUF'] == b.labels['INBUF'] + NUM_BUCKETS * 3, \
+        "INBUF and CTXBUF must be contiguous"
 
     return b
+
+
+def _build_fastest_that_fits(model_path: str, max_output_len: int,
+                             org: int) -> EZ80Builder:
+    """Take the first kernel in :data:`KERNELS` whose image fits Agon SRAM.
+
+    The unrolled kernels trade size for speed, so a large enough model can only
+    be built with the compact one.  Preserving that fallback is the whole point
+    of keeping it around.
+    """
+    last = len(KERNELS) - 1
+    for i, kernel in enumerate(KERNELS):
+        builder = build_autoreg(model_path, max_output_len, org, kernel=kernel)
+        size = len(builder.build())
+        fits = org + size <= AGON_LOAD_ADDR + AGON_MAX_IMAGE
+        if fits:
+            return builder
+        if i == last:
+            # Nothing smaller left to try. Say so plainly rather than hand back
+            # a binary no Agon can load without comment; verify_artifacts will
+            # reject it too, but whoever ran this build should hear it first.
+            print(f"\nWARNING: even the {kernel} kernel needs {size:,} bytes, "
+                  f"more than the {AGON_MAX_IMAGE:,} an Agon can load. "
+                  f"The model is too large for this target.")
+            return builder
+        print(f"\nThe {kernel} kernel needs {size:,} bytes, more than the "
+              f"{AGON_MAX_IMAGE:,} an Agon can load; trying the next kernel.")
+    raise AssertionError("unreachable: the last kernel is always accepted")
 
 
 def main() -> None:
@@ -673,20 +886,25 @@ def main() -> None:
                         help='Output MOS binary')
     parser.add_argument('--max-output-len', type=int, default=MAX_OUTPUT_LEN,
                         help='Maximum characters generated per response')
+    parser.add_argument('--kernel', '-k', default='auto', choices=['auto', *KERNELS],
+                        help='Layer kernel (default: auto = fastest that fits)')
     args = parser.parse_args()
 
     print("Building eZ80 CHAT.bin...\n")
-    b = build_autoreg(args.model, max_output_len=args.max_output_len)
+    b = build_autoreg(args.model, max_output_len=args.max_output_len,
+                      kernel=args.kernel)
 
     print("\nKey addresses:")
-    for name in ('START', 'GENERATE', 'LAYER', 'ARGMAX', 'TOKENIZE', 'BIASES', 'WTS1'):
+    for name in ('START', 'GENERATE', 'LAYER', 'LAYER1', 'ARGMAX', 'TOKENIZE',
+                 'NEUREND', 'BIASES', 'WTS1'):
         if name in b.labels:
             print(f"  {name}: {b.labels[name]:06X}h")
 
     b.save(args.output)
     size = len(b.code)
     print(f"\nTotal size: {size:,} bytes ({size / 1024:.1f} KB)")
-    print(f"Loads at {AGON_LOAD_ADDR:06X}h, runs in ADL mode")
+    print(f"Loads at {AGON_LOAD_ADDR:06X}h, runs in ADL mode; "
+          f"{AGON_MAX_IMAGE - size:,} bytes of Agon SRAM to spare")
 
 
 if __name__ == '__main__':
