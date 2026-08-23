@@ -499,9 +499,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.ld_hl_mem_label('ACC')    #   ld hl, (ACC)                          
     b.dec_a()                   #   dec a          
     b.jr_z('MA_P1')             #   jr z, MA_P1 ; jump if a is +1 equivalent (33% jump probability)
-    b.sbc_hl_de()               #   sbc hl, de ; a is -1 or -2 equivalent             
+    b.sbc_hl_de()               #   sbc hl, de ; a is -1 or -2 equivalent (carry is clear on entry)
     b.dec_a()                   #   dec a          
     b.jr_z('MA_MRET')           #   jr z, MA_MRET ; skip next sbc if a is just -1 equivalent (50% jump probability)
+    b.or_a()                    #   or a ; clear carry: the sbc above may have borrowed
     b.sbc_hl_de()               #   sbc hl, de ; second time since a is -2 equivalent
     b.label('MA_MRET')          # MA_MRET:               
     b.ld_mem_label_hl('ACC')    #   ld (ACC), hl                          

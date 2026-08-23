@@ -619,6 +619,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt'):
     b.ld_hl_mem_label('ACC')
     b.or_a()
     b.sbc_hl_de()
+    b.or_a()  # clear carry: the sbc above may have borrowed
     b.sbc_hl_de()
     b.ld_mem_label_hl('ACC')
     b.ret()
