@@ -9,7 +9,7 @@ The ZX Spectrum 48K port adapts the CP/M version to use ZX Spectrum ROM routines
 ## Key Differences from CP/M Version
 
 ### Memory Layout
-- **Origin Address**: 0x8000 (32768) instead of 0x0100
+- **Origin Address**: 0x6000 (24576) instead of 0x0100
 - Uses high memory to avoid overwriting BASIC system variables
 - Compatible with ZX Spectrum 48K memory map
 
@@ -77,8 +77,9 @@ Most ZX Spectrum emulators support TAP files:
    ```
    Then in BASIC:
    ```basic
+   CLEAR 24575
    LOAD "" CODE
-   RANDOMIZE USR 32768
+   RANDOMIZE USR 24576
    ```
 
 2. **ZEsarUX**:
@@ -103,13 +104,14 @@ Transfer TAP files to real ZX Spectrum using:
 Once the TAP is loaded (via emulator or real hardware):
 
 ```basic
+CLEAR 24575
 LOAD "" CODE
 ```
 
 Wait for loading to complete, then run:
 
 ```basic
-RANDOMIZE USR 32768
+RANDOMIZE USR 24576
 ```
 
 The program will:
@@ -140,7 +142,7 @@ Typical memory layout for a 256→192→128→64 architecture:
 
 | Section | Size | Address Range | Description |
 |---------|------|---------------|-------------|
-| Code | ~5 KB | 0x8000-0x93FF | Z80 machine code |
+| Code | ~5 KB | 0x6000-0x73FF | Z80 machine code |
 | Variables | ~100 bytes | 0x9400-0x9463 | Runtime variables |
 | Input Buffer | 62 bytes | 0x9464-0x94A1 | User input |
 | Token Buffer | 512 bytes | 0x94A2-0x96A1 | Trigram buckets (256 × 2) |
@@ -148,7 +150,18 @@ Typical memory layout for a 256→192→128→64 architecture:
 | Output Buffer | 128 bytes | 0x99C2-0x9A41 | Character scores |
 | Weights | ~28 KB | 0x9A42-0xFFFF | 2-bit quantized weights |
 
-**Total**: ~35-40 KB (fits comfortably in 48K)
+**Total**: ~35-40 KB
+
+The load address bounds how large a model can be, since RAM ends at `0xFFFF`:
+
+| Load address | Available |
+|---|---|
+| `0x6000` (default) | 40,960 bytes |
+| `0x8000` | 32,768 bytes |
+
+Both shipped examples exceed 32,768 bytes, which is why the origin is `0x6000`.
+`buildz80tap.py` refuses to emit an image that would not load and reports the
+headroom it has left.
 
 ### Performance
 
@@ -239,7 +252,7 @@ For ~10x faster inference with larger file size:
 
 ### Program crashes on run
 
-- Ensure using `RANDOMIZE USR 32768`
+- Ensure using `RANDOMIZE USR 24576`
 - Check model was built correctly
 - Verify sufficient memory (48K required)
 
