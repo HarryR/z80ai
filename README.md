@@ -100,6 +100,9 @@ Z80-μLM runs on multiple Z80-based platforms:
   - 24-bit addressing, so the 64KB ceiling on model size is gone
   - 24-bit accumulators, which cannot overflow the way the Z80's 16-bit ones can
   - No 256-neuron layer limit
+  - Three kernels, fastest-that-fits: weights unrolled into code, optionally
+    accumulated input-major so zero activations are skipped too — 23x fewer
+    instructions than walking a weight stream
 
 For ZX Spectrum builds, use `run-zx.sh` in example directories or see the [ZX Spectrum guide](ZX-SPECTRUM.md).
 
@@ -113,15 +116,26 @@ costs. For the shipped 256→256→192→128→11 `guess` model:
 | CP/M, packed weights | 38,920 | 3,004,037 | 26,843,795 | 6.71 @ 4 MHz |
 | CP/M, index lists | 43,520 | 319,515 | 1,992,905 | 0.50 @ 4 MHz |
 | ZX Spectrum | 38,949 | 3,004,037 | 26,843,795 | 7.67 @ 3.5 MHz |
-| Agon eZ80 | 146,581 | 923,194 | — | — |
+| Agon eZ80, byte stream | 146,626 | 923,194 | — | — |
+| Agon eZ80, unrolled | 251,997 | 90,340 | — | — |
+| Agon eZ80, column-major | 384,397 | 39,605 | — | — |
 
 ```bash
-python bench.py --model examples/guess/model.npz --target com fast ez80
+python bench.py --model examples/guess/model.npz \
+                --target com fast ez80-compact ez80-row ez80
 ```
 
 eZ80 T-states are omitted rather than quoted misleadingly: its per-instruction
 timings differ substantially from the Z80's, so instruction count is the honest
 cross-architecture comparison.
+
+The eZ80 rows are the same network three ways. The byte stream walks every
+weight at runtime; unrolling turns each weight into code, so the ~73% that are
+zero cost nothing; column-major additionally skips zero *activations*, which
+takes the work from 37,865 multiply-accumulates down to 8,192. All three produce
+byte-identical output — that equality is the main thing
+[the tests](TESTING.md) check. `--target ez80` picks the fastest one that fits
+in Agon SRAM. See [EZ80.md](EZ80.md).
 
 ## Interaction Style
 

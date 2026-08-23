@@ -44,6 +44,9 @@ the bytes.
 | `test_kernels.py` | Emulator memory vs. reference, value by value: tokenizer buckets, context buckets, output logits |
 | `test_end_to_end.py` | Generated text from all three Z80 targets vs. the reference |
 | `test_ez80.py` | ADL encoding, the Agon header, and the same numeric comparisons for the eZ80 |
+| `test_ez80_kernels.py` | All three eZ80 kernels against the reference *and* against each other, plus the flooring/ReLU boundary, the active-column list, and kernel selection |
+| `test_ez80_argmax.py` | That the output layer is scanned in full however wide it is |
+| `test_ez80_emulator.py` | eZ80-only opcodes and the two flag facts the kernels branch on |
 | `test_builders.py` | TAP container layout, TPA size limits, embedded weight/bias/charset data |
 | `test_model_shapes.py` | Layer discovery order, and the widths a Z80 backend can actually assemble |
 | `test_build_frontend.py` | Automatic target selection |
@@ -81,6 +84,31 @@ vectors often argmax to the same character, so a text comparison will happily
 pass over a broken kernel. Both of the arithmetic bugs found while writing these
 tests — the `MULADD` borrow and the packed-weight row desync — produced correct
 *text* on the models that first exercised them.
+
+The strongest technique available needs no reference model at all. The eZ80
+backend emits the same network three ways — a runtime weight stream, unrolled
+weight-major, and unrolled column-major — and
+`test_ez80_kernels.py::test_all_kernels_agree_bit_for_bit` requires all three to
+produce a byte-identical `OUTBUF`. Three independently generated programs
+agreeing exactly is very hard to achieve by accident, and it stays meaningful
+for models where writing down the expected answer by hand would not.
+
+## When a correct test is not enough
+
+Some optimizations are invisible to correctness tests, because getting them
+wrong only makes the program slower. The column-major kernel skips inputs whose
+activation is zero; appending one anyway is harmless, since its column adds zero
+everywhere. Every numeric test still passes, and the speedup is gone.
+
+`test_hidden_layer_list_holds_exactly_its_nonzero_activations` and
+`test_activation_that_floors_to_zero_is_not_listed` check the *list* rather than
+the answer. The second exists because the first missed the case: it used a
+natural model, and the only way a neuron reaches the shift and still comes out
+zero is a pre-shift accumulator in `[0, 3]` — ReLU catches everything more
+negative earlier. That band has to be arranged deliberately.
+
+If an optimization can regress without failing anything, it needs a test that
+looks at the mechanism, not the output.
 
 ## Speed
 
