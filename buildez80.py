@@ -9,19 +9,35 @@ address space, so this backend drops those compromises: 24-bit accumulators
 (the 16-bit overflow the QAT loss trains against cannot happen at all), 24-bit
 activations, and no byte counters anywhere, so layers may be any width.
 
-Two kernels, chosen by size (``--kernel``, default ``auto``):
+Three kernels, chosen by size (``--kernel``, default ``auto``).  On the shipped
+`guess` model, one forward pass costs:
 
-  row      Every weight becomes code.  ``LD DE,(nnnnnn)`` reaches any
-           activation in one instruction, so a nonzero weight costs a load and
-           an add - and a zero weight, which is about 73% of them, costs
-           nothing at all.  Ten times fewer instructions than `compact` for
-           roughly 1.7x the size.  This is what the address space actually
-           buys; an index list would still have to turn each index into an
-           address, and the accumulator is in HL so `LD DE,(HL)` is unavailable.
-  compact  One signed byte per weight, walked at runtime, neurons and layers
-           closed by sentinels.  Visits every weight including the zeros, so it
-           is slow, but its size does not depend on the model - which makes it
-           the only option once a model is too large to unroll.
+  column   923,194 -> 39,605 instructions, 384KB.  Unrolled and accumulated
+           input-major, so it skips zero *activations* as well as zero weights:
+           only 8,192 of the model's 37,865 nonzero weights are actually
+           reached, because the input vector is ~10% nonzero and hidden layers
+           are 16-39%.  Accumulators live in memory rather than a register,
+           costing an instruction per multiply-accumulate - a good trade when
+           ~78% of columns are skipped outright.
+  row      923,194 -> 90,340 instructions, 252KB.  Unrolled weight-major.
+           ``LD DE,(nnnnnn)`` reaches any activation in one instruction, so a
+           nonzero weight costs a load and an add and a zero weight costs
+           nothing.  Cannot skip zero activations: which ones are zero changes
+           every step.
+  compact  923,194 instructions, 147KB.  One signed byte per weight, walked at
+           runtime, neurons and layers closed by sentinels.  Visits every
+           weight including the ~73% that are zero, so it is slow - but its
+           size does not depend on the model, which makes it the only option
+           once a model is too large to unroll.
+
+Unrolling is what the address space actually buys.  An index list, which is
+what the CP/M builds use, would still have to turn each index into an address,
+and the accumulator sits in HL so ``LD DE,(HL)`` is unavailable.
+
+Reordering and regrouping the sum - splitting it by weight sign, or walking it
+input-major - is exact rather than approximate: the reference wraps the
+accumulator to 24 bits, and addition mod 2**24 is associative and commutative.
+The >>2 is the part that may never move, because it floors.
 
 `auto` takes the first kernel whose image fits in Agon SRAM.  Note that ADL
 addresses 16MB but a shipping Agon has 512KB, and that is the real ceiling.
@@ -251,6 +267,183 @@ def _emit_neuron_epilogue(b: EZ80Builder) -> None:
     b.ret()
 
 
+def _emit_column_epilogue(b: EZ80Builder) -> None:
+    """Finish one neuron of a column-major layer.
+
+    Entered by CALL with
+
+        HL  the neuron's accumulator, already holding bias plus contributions
+        BC  the address of this neuron's column block in the *next* layer
+        IX  where this neuron's output goes
+        IY  where to append BC if the output turns out to be nonzero
+
+    The append is what lets the next layer skip zero activations: it only ever
+    visits columns this loop put on the list.  The test has to be on the value
+    *after* the shift, because a small positive accumulator floors to zero.
+    """
+    b.label('NEUREND_COL')
+    b.ld_de_nn(0)
+    b.or_a()
+    b.sbc_hl_de()       # HL is unchanged; S and Z now describe it
+    b.jp_m('NC_ZERO')   # negative relus to zero whatever the shift does
+    b.jp('NC_SHIFT')
+
+    b.label('NEUREND_COL_OUT')
+    b.jp('NC_SHIFT_NOLIST')  # output layer: keep negatives, build no list
+
+    b.label('NC_SHIFT')
+    _emit_shift(b)
+    # Nonzero activations go on the next layer's column list.
+    b.ld_a_mem_label('TMP0')
+    b.ld_hl_label('TMP1')
+    b.or_hl_ind()
+    b.inc_hl()
+    b.or_hl_ind()
+    b.jp_z('NC_STORE')
+    b.ld_iyd_bc(0)
+    b.inc_iy()
+    b.inc_iy()
+    b.inc_iy()
+    b.jp('NC_STORE')
+
+    b.label('NC_SHIFT_NOLIST')
+    _emit_shift(b)
+
+    b.label('NC_STORE')
+    for k, name in enumerate(('TMP0', 'TMP1', 'TMP2')):
+        b.ld_a_mem_label(name)
+        b.ld_ixd_a(k)
+    b.label('NC_ADV')
+    b.inc_ix()
+    b.inc_ix()
+    b.inc_ix()
+    b.ret()
+
+    b.label('NC_ZERO')
+    b.xor_a()
+    for k in range(3):
+        b.ld_ixd_a(k)
+    b.jp('NC_ADV')
+
+
+def _emit_shift(b: EZ80Builder) -> None:
+    """Arithmetic >>2 of HL through TMP0..TMP2, byte at a time."""
+    b.ld_mem_label_hl('TMP0')
+    for _ in range(SHIFT):
+        b.ld_hl_label('TMP2')
+        b.sra_hl_ind()
+        b.dec_hl()
+        b.rr_hl_ind()
+        b.dec_hl()
+        b.rr_hl_ind()
+
+
+def _emit_layers_column(b: EZ80Builder, params: dict, layer_names: list[str],
+                        num_layers: int) -> None:
+    """Emit every layer column-major, visiting only nonzero activations.
+
+    Row-major cannot skip a zero activation, because which activations are zero
+    changes every step.  Column-major can: each column block is the code for
+    "this input is nonzero, add its contribution everywhere it goes", and a
+    layer only runs the blocks its predecessor put on the list.  On the shipped
+    model that is 8,192 of 37,865 multiply-accumulates.
+
+    Accumulating input-major rather than neuron-major moves the accumulators
+    from a register into memory, costing an instruction per multiply-accumulate.
+    It is worth it because ~78% of columns are skipped entirely.  Reordering
+    the sum is exact for the same reason it is in the row-major kernel: the
+    reference wraps to 24 bits and addition mod 2**24 is associative.
+
+    Columns are dispatched as threaded code - the list holds addresses, and IY
+    walks it.  Deliberately not SP: keeping the real stack intact means CALL
+    and RET stay usable, which is what lets the per-neuron epilogue be shared
+    instead of inlined 587 times.
+    """
+    for i, name in enumerate(layer_names):
+        in_buf, out_buf = layer_buffers(i, num_layers)
+        weights = np.clip(np.asarray(params[f'{name}_weight']), -2, 1)
+        biases = np.asarray(params[f'{name}_bias']).astype(np.int64)
+        num_out, num_in = weights.shape
+        last = i == num_layers - 1
+
+        b.label(f'LAYER{i+1}')
+        for j, bias in enumerate(biases):
+            b.ld_hl_nn(int(bias) & 0xFFFFFF)
+            b.ld_mem_label_hl('ACC', 3 * j)
+        b.ld_iy_label('COLLIST')
+
+        b.label(f'CDRIVE{i+1}')
+        b.ld_hl_iyd(0)      # next active column's block address
+        b.ld_de_nn(3)
+        b.add_iy_de()
+        b.jp_hl()
+
+        # One block per input column, holding that column's nonzero weights.
+        for col in range(num_in):
+            b.label(f'COL{i+1}_{col}')
+            b.ld_de_mem_label(in_buf, 3 * col)   # DE = x_col
+            b.ld_hl_nn(0)
+            b.or_a()
+            b.sbc_hl_de()
+            b.ld_mem_label_hl('TMPV')
+            b.ld_bc_mem_label('TMPV')            # BC = -x_col
+            for out in np.nonzero(weights[:, col])[0]:
+                weight = int(weights[out, col])
+                b.ld_hl_mem_label('ACC', 3 * int(out))
+                if weight == 1:
+                    b.add_hl_de()
+                else:
+                    b.add_hl_bc()
+                    if weight == -2:
+                        b.add_hl_bc()
+                b.ld_mem_label_hl('ACC', 3 * int(out))
+            b.jp(f'CDRIVE{i+1}')
+
+        # The list terminator points here, so this is where the walk lands.
+        b.label(f'LEPI{i+1}')
+        b.ld_ix_label(out_buf)
+        b.ld_iy_label('COLLIST')
+        for j in range(num_out):
+            b.ld_hl_mem_label('ACC', 3 * j)
+            if last:
+                b.call('NEUREND_COL_OUT')
+            else:
+                b.ld_bc_label(f'COL{i+2}_{j}')
+                b.call('NEUREND_COL')
+        if last:
+            b.ret()
+        else:
+            b.ld_hl_label(f'LEPI{i+2}')
+            b.ld_iyd_hl(0)                       # terminate the next layer's list
+            b.jp(f'LAYER{i+2}')
+
+
+def _emit_input_scan(b: EZ80Builder, num_in: int) -> None:
+    """Build layer 1's column list from the tokenizer's output.
+
+    The later layers get their lists for free in the neuron epilogue, but the
+    input vector is written by BUCKET_ADD, which can hit the same bucket twice.
+    Appending there would put a column on the list twice and double its
+    contribution, so the list is built by one pass over the finished vector.
+    """
+    b.label('SCAN_INPUTS')
+    b.ld_iy_label('COLLIST')
+    b.ld_de_nn(0)
+    b.ld_bc_nn(3)
+    for j in range(num_in):
+        b.ld_hl_mem_label('INBUF', 3 * j)
+        b.or_a()
+        b.sbc_hl_de()       # DE is 0, so HL survives; Z says whether it is zero
+        b.jp_z(f'SCAN{j}')
+        b.ld_hl_label(f'COL1_{j}')
+        b.ld_iyd_hl(0)
+        b.add_iy_bc()
+        b.label(f'SCAN{j}')
+    b.ld_hl_label('LEPI1')
+    b.ld_iyd_hl(0)          # terminator: where the walk goes when the list ends
+    b.ret()
+
+
 def _emit_layers_unrolled(b: EZ80Builder, params: dict, layer_names: list[str],
                           num_layers: int) -> None:
     """Emit every layer as straight-line code, one instruction pair per weight.
@@ -289,7 +482,7 @@ def _emit_layers_unrolled(b: EZ80Builder, params: dict, layer_names: list[str],
 
 
 #: Kernels this backend can emit, fastest first.  See the module docstring.
-KERNELS = ('row', 'compact')
+KERNELS = ('column', 'row', 'compact')
 
 
 def build_autoreg(model_path: str = 'command_model_autoreg.pt',
@@ -478,6 +671,11 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
             b.ld_mem_label_a('RELUF')
             b.call('LAYER')
         b.ret()
+    elif kernel == 'column':
+        # The column list has to be rebuilt each step: the context half of the
+        # input changes with every character emitted.
+        b.call('SCAN_INPUTS')
+        b.jp('LAYER1')
     else:
         # The unrolled layers are emitted last, after every JR-using routine,
         # so a quarter of a megabyte of straight-line code cannot put any
@@ -776,9 +974,13 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     # === UNROLLED LAYERS =====================================================
     # Emitted after every routine that uses JR, because from here on the code
     # is far too long for a relative jump to reach across.
-    if kernel != 'compact':
+    if kernel == 'row':
         _emit_neuron_epilogue(b)
         _emit_layers_unrolled(b, params, layer_names, num_layers)
+    elif kernel == 'column':
+        _emit_column_epilogue(b)
+        _emit_input_scan(b, layer_sizes[0])
+        _emit_layers_column(b, params, layer_names, num_layers)
 
     # === DATA ================================================================
     b.label('CHARTBL')
@@ -831,6 +1033,17 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.label('OUTEND')
     b.ds(3)
 
+    if kernel == 'column':
+        # One 24-bit accumulator per neuron of the widest layer, plus the list
+        # of active columns - one entry per input of the widest layer, and one
+        # more for the terminator.
+        widest_out = max(layer_sizes[1:])
+        widest_in = max(layer_sizes[:-1])
+        b.label('ACC')
+        b.ds24(widest_out)
+        b.label('COLLIST')
+        b.ds24(widest_in + 1)
+
     if kernel == 'compact':
         b.label('BIASES')
         b.blob(bias_blob)
@@ -845,6 +1058,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     assert b.labels['CTXBUF'] == b.labels['INBUF'] + NUM_BUCKETS * 3, \
         "INBUF and CTXBUF must be contiguous"
 
+    b.kernel = kernel
     return b
 
 

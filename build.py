@@ -16,17 +16,21 @@ only if the result would overrun the transient program area. That is the choice
 you want almost every time, and it is what buildfastz80com.py's own header
 asked for.
 
-The eZ80 target applies the same fastest-that-fits policy to its own two
+The eZ80 target applies the same fastest-that-fits policy to its own three
 kernels:
 
-  row      every weight unrolled into straight-line code, so the ~73% that are
-           zero cost nothing. Ten times fewer instructions, 1.7x the size.
+  column   unrolled and accumulated input-major, so zero activations are
+           skipped as well as zero weights. 23x fewer instructions, 2.6x the
+           size.
+  row      unrolled weight-major: the ~73% of weights that are zero cost
+           nothing. 10x fewer instructions, 1.7x the size.
   compact  a weight stream walked at runtime. Slow, but its size does not
            depend on the model, so it is the only option for a model too large
            to unroll.
 
 `--target ez80` chooses between them against the 512KB a real Agon has - not
-the 16MB ADL can address. `ez80-row` and `ez80-compact` force one.
+the 16MB ADL can address. `ez80-column`, `ez80-row` and `ez80-compact` force
+one.
 
 Usage:
     python build.py --model examples/guess/model.npz --output GUESS.COM
@@ -84,9 +88,7 @@ def build_ez80(model: str, max_output_len: int,
     builder = buildez80.build_autoreg(
         model, max_output_len=max_output_len, kernel=kernel
     )
-    # Which kernel `auto` settled on is visible in the labels: only the compact
-    # one emits a weight stream.
-    return builder, "compact" if "WTS1" in builder.labels else "row"
+    return builder, builder.kernel
 
 
 def main() -> None:
@@ -97,7 +99,8 @@ def main() -> None:
     parser.add_argument("--output", "-o", required=True, help="Output file")
     parser.add_argument("--target", "-t", default="auto",
                         choices=["auto", "cpm", "cpm-fast", "cpm-packed", "zx",
-                                 "ez80", "ez80-row", "ez80-compact"],
+                                 "ez80", "ez80-column", "ez80-row",
+                                 "ez80-compact"],
                         help="Platform and weight layout (default: auto = cpm)")
     parser.add_argument("--max-output-len", type=int, default=50,
                         help="Maximum characters generated per response")

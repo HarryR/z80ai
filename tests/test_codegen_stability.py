@@ -32,17 +32,17 @@ GOLDEN = {
                   "1c26b542228fff147991e4b2b8c1e92652d46b4fb8b9eeafbb0442169b085a5a"),
     "GUESS-FAST.COM": (buildfastz80com, "guess",
                        "cd12b1f6055558a9a2ae2f6b241c6c7e5229f1cc325efacbd61842d00f2ef3ac"),
-    # Changed twice: eZ80 ARGMAX stopped counting neurons in B (no 256-output
-    # cap, 24-bit MAXI/RESULT), and the default kernel became the unrolled
-    # weight-major one - 10x fewer instructions for 1.7x the size.
+    # Changed when eZ80 ARGMAX stopped counting neurons in B (no 256-output
+    # cap, 24-bit MAXI/RESULT) and again when the default kernel became the
+    # unrolled column-major one - 23x fewer instructions for 2.6x the size.
     "GUESS.bin": (buildez80, "guess",
-                  "e5a243778e9013ba33173cb642498bb2602c91827735a124b4a10ee5f88c637f"),
+                  "8eb986d2c73574344be128c66a9a71e08727bcc948d4afe8d35451f35c3db751"),
     "CHAT.COM": (buildz80com, "tinychat",
                  "d7acba3d23bd5ed94e5028855f01d82fff918766bd2907c8b9c3ae1499c4cd70"),
     "CHAT-FAST.COM": (buildfastz80com, "tinychat",
                       "788d571fd54bf0aa459732428ecc84c62d48038bc03466d4de3e2309ab106e6e"),
     "CHAT.bin": (buildez80, "tinychat",
-                 "e5dcadca86d23c79b2a0249681c5fc3dd5474bb1be5ec019512ce21be979de0a"),
+                 "b625752319916915e15091e38562c6be10e4aef932ac0f269cd365159fa62cba"),
 }
 
 # The .TAP hashes cover the container, not the raw image, so they are checked

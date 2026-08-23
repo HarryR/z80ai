@@ -32,8 +32,10 @@ TARGETS = {
     "tap": ("buildz80tap", "ZX Spectrum, packed weights", 3_500_000, False, {}),
     "ez80-compact": ("buildez80", "Agon eZ80, one byte per weight",
                      18_432_000, True, {"kernel": "compact"}),
-    "ez80": ("buildez80", "Agon eZ80, unrolled weight-major",
-             18_432_000, True, {"kernel": "row"}),
+    "ez80-row": ("buildez80", "Agon eZ80, unrolled weight-major",
+                 18_432_000, True, {"kernel": "row"}),
+    "ez80": ("buildez80", "Agon eZ80, unrolled column-major",
+             18_432_000, True, {"kernel": "column"}),
 }
 
 

@@ -36,6 +36,8 @@ class EZ80Builder(Z80Builder):
 
     def __init__(self, org: int = AGON_LOAD_ADDR) -> None:
         super().__init__(org=org)
+        #: Which layer kernel produced this image; set by buildez80.build_autoreg.
+        self.kernel: str | None = None
 
     # --- 24-bit data ---------------------------------------------------------
 
@@ -90,6 +92,14 @@ class EZ80Builder(Z80Builder):
     def ld_de_ixd(self, d: int) -> None:
         """LD DE,(IX+d) - load 24 bits."""
         self.emit(0xDD, 0x17, _disp(d))
+
+    def ld_iyd_bc(self, d: int) -> None:
+        """LD (IY+d),BC - store 24 bits."""
+        self.emit(0xFD, 0x0F, _disp(d))
+
+    def ld_bc_iyd(self, d: int) -> None:
+        """LD BC,(IY+d) - load 24 bits."""
+        self.emit(0xFD, 0x07, _disp(d))
 
     def ld_ixd_de(self, d: int) -> None:
         """LD (IX+d),DE - store 24 bits."""

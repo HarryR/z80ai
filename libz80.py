@@ -324,6 +324,8 @@ class Z80Builder:
     def add_hl_sp(self) -> None: self.emit(0x39)  # HL = HL + SP
     def add_ix_de(self) -> None: self.emit(0xDD, 0x19)  # IX = IX + DE
     def add_iy_de(self) -> None: self.emit(0xFD, 0x19)  # IY = IY + DE
+    def add_iy_bc(self) -> None: self.emit(0xFD, 0x09)  # IY = IY + BC
+    def or_hl_ind(self) -> None: self.emit(0xB6)  # OR (HL)
 
     # Bit
     def bit_7_c(self) -> None: self.emit(0xCB, 0x79)

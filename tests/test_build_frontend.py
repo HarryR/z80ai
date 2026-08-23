@@ -33,9 +33,11 @@ def test_fits_in_tpa_leaves_room_for_the_stack(tiny_model_path):
     )
 
 
-def test_ez80_auto_picks_the_unrolled_kernel_when_it_fits(tiny_model_path):
+def test_ez80_auto_picks_the_fastest_kernel_when_it_fits(tiny_model_path):
+    import buildez80
+
     _builder, layout = build.build_ez80(tiny_model_path, max_output_len=4)
-    assert layout == "row"
+    assert layout == buildez80.KERNELS[0]
 
 
 def test_ez80_auto_falls_back_to_compact_when_unrolling_would_not_fit(
@@ -50,6 +52,8 @@ def test_ez80_auto_falls_back_to_compact_when_unrolling_would_not_fit(
 
 
 def test_ez80_explicit_kernels_are_honoured(tiny_model_path):
-    _, row = build.build_ez80(tiny_model_path, 4, kernel="row")
-    _, compact = build.build_ez80(tiny_model_path, 4, kernel="compact")
-    assert (row, compact) == ("row", "compact")
+    import buildez80
+
+    for kernel in buildez80.KERNELS:
+        _, chosen = build.build_ez80(tiny_model_path, 4, kernel=kernel)
+        assert chosen == kernel

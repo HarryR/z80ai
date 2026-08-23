@@ -28,7 +28,7 @@ from libez80 import AGON_MAX_IMAGE
 from libhost import run_agon
 from libinfer import Model
 
-KERNELS = ["row", "compact"]
+KERNELS = ["column", "row", "compact"]
 QUERIES = ["HELLO", "ARE YOU A ROBOT", "X"]
 GEN_LEN = 6
 
@@ -259,10 +259,14 @@ def test_unrolled_build_has_no_out_of_range_relative_jumps(guess_model_path):
 # --- kernel selection --------------------------------------------------------
 
 
-def test_auto_picks_the_unrolled_kernel_when_it_fits(tiny_model_path):
+def test_auto_picks_the_fastest_kernel_when_it_fits(tiny_model_path):
     builder = buildez80.build_autoreg(tiny_model_path, max_output_len=1)
-    assert "NEUREND" in builder.labels
-    assert "WTS1" not in builder.labels, "auto should not have chosen compact"
+    assert builder.kernel == buildez80.KERNELS[0]
+
+
+def test_each_kernel_records_which_one_it_is(tiny_model_path):
+    for kernel in KERNELS:
+        assert build(tiny_model_path, kernel).kernel == kernel
 
 
 def test_auto_falls_back_to_compact_when_unrolling_would_not_fit(
@@ -273,14 +277,179 @@ def test_auto_falls_back_to_compact_when_unrolling_would_not_fit(
     path = str(tmp_path / "huge.npz")
     model.save_npz(path)
 
-    assert len(build(path, "row", max_output_len=1).build()) > AGON_MAX_IMAGE
-    builder = buildez80.build_autoreg(path, max_output_len=1)
-    assert "WTS1" in builder.labels, "auto should have fallen back to compact"
+    for kernel in KERNELS[:-1]:
+        assert len(build(path, kernel, max_output_len=1).build()) > AGON_MAX_IMAGE
+    assert buildez80.build_autoreg(path, max_output_len=1).kernel == "compact"
+
+
+def test_auto_steps_down_one_rung_at_a_time(tmp_path, model_factory, monkeypatch):
+    """A ceiling that rules out only the fastest kernel must not skip to the last."""
+    model = model_factory([256, 24, 18], seed=13)
+    path = str(tmp_path / "mid.npz")
+    model.save_npz(path)
+
+    row_size = len(build(path, "row", max_output_len=1).build())
+    monkeypatch.setattr(buildez80, "AGON_MAX_IMAGE", row_size)
+    assert buildez80.build_autoreg(path, max_output_len=1).kernel == "row"
 
 
 def test_unknown_kernel_is_rejected(tiny_model_path):
     with pytest.raises(ValueError, match="unknown kernel"):
         buildez80.build_autoreg(tiny_model_path, kernel="nope")
+
+
+# --- column-major specifics --------------------------------------------------
+
+
+def test_active_column_list_holds_exactly_the_nonzero_inputs(tiny_model_path):
+    """The list is the whole optimization: wrong contents means wrong answers."""
+    builder = build(tiny_model_path, "column")
+    cpu = run_ez80_until(builder, "HELLO", "LAYER1")
+
+    x = reference_input("HELLO")
+    want = [
+        builder.labels[f"COL1_{j}"] for j in range(len(x)) if x[j] != 0
+    ]
+    base = builder.labels["COLLIST"]
+    got = [cpu.peek_word(base + 3 * i, 3) for i in range(len(want))]
+    assert got == want
+
+    terminator = cpu.peek_word(base + 3 * len(want), 3)
+    assert terminator == builder.labels["LEPI1"], "list is not terminated"
+
+
+def test_active_column_list_has_no_duplicates(tiny_model_path):
+    """BUCKET_ADD can hit one bucket twice; appending there would double it."""
+    builder = build(tiny_model_path, "column")
+    cpu = run_ez80_until(builder, "ABABABAB", "LAYER1")
+
+    base = builder.labels["COLLIST"]
+    entries = []
+    for i in range(257):
+        value = cpu.peek_word(base + 3 * i, 3)
+        if value == builder.labels["LEPI1"]:
+            break
+        entries.append(value)
+    else:
+        pytest.fail("never found the terminator")
+    assert len(entries) == len(set(entries))
+
+
+def test_hidden_layer_list_holds_exactly_its_nonzero_activations(
+    tmp_path, model_factory
+):
+    """The later lists are built by the epilogue, and that is the whole win.
+
+    Appending a zero activation is numerically harmless - its column adds zero
+    everywhere - so no correctness test can notice it.  Only this one can, and
+    without it the sparsity could regress silently into a slower kernel that
+    still passes everything else.
+    """
+    model = model_factory([256, 32, 20], seed=91)
+    path = str(tmp_path / "two.npz")
+    model.save_npz(path)
+    builder = build(path, "column", max_output_len=1)
+
+    # Stop once layer 1's epilogue has finished building layer 2's list.
+    cpu = run_ez80_until(builder, "HELLO", "LAYER2")
+
+    activations = libinfer.forward_layers(
+        model, reference_input("HELLO"), accum_bits=24
+    )[0]
+    want = [
+        builder.labels[f"COL2_{j}"]
+        for j in range(len(activations))
+        if activations[j] != 0
+    ]
+    assert want, "the fixture produced an all-zero hidden layer"
+    assert len(want) < len(activations), "nothing was skipped, so nothing is tested"
+
+    base = builder.labels["COLLIST"]
+    got = [cpu.peek_word(base + 3 * i, 3) for i in range(len(want))]
+    assert got == want
+    assert cpu.peek_word(base + 3 * len(want), 3) == builder.labels["LEPI2"]
+
+
+def test_activation_that_floors_to_zero_is_not_listed(tmp_path, model_factory):
+    """A small *positive* accumulator shifts to zero, and must not be listed.
+
+    ReLU catches the negative case earlier, so this narrow band - pre-shift
+    accumulator in [0, 3] - is the only way a neuron reaches the shift and
+    still comes out zero.  Testing the list on a natural model misses it
+    entirely, so the accumulator is arranged to land there on purpose.
+    """
+    model = model_factory([256, 24, 16], seed=5)
+    # Neuron 7 of the hidden layer: no inputs at all, bias 2, so 2 >> 2 == 0.
+    model.weights[0][7, :] = 0
+    model.biases[0][7] = 2
+    path = str(tmp_path / "floor.npz")
+    model.save_npz(path)
+
+    activations = libinfer.forward_layers(
+        model, reference_input("HELLO"), accum_bits=24
+    )[0]
+    assert activations[7] == 0, "the fixture did not land in the flooring band"
+
+    builder = build(path, "column", max_output_len=1)
+    cpu = run_ez80_until(builder, "HELLO", "LAYER2")
+
+    base = builder.labels["COLLIST"]
+    listed = []
+    for i in range(len(activations) + 1):
+        value = cpu.peek_word(base + 3 * i, 3)
+        if value == builder.labels["LEPI2"]:
+            break
+        listed.append(value)
+    assert builder.labels["COL2_7"] not in listed
+
+
+def test_column_major_with_an_all_zero_input(tmp_path, model_factory):
+    """No active columns at all: the accumulators must still hold the biases."""
+    model = model_factory([256, 10], charset=" AB\x00", seed=67)
+    path = str(tmp_path / "zeroin.npz")
+    model.save_npz(path)
+    builder = build(path, "column", max_output_len=1)
+
+    # Stop before the input scan, blank the whole input vector, and let INFER
+    # rebuild the column list over it - which should come out empty.
+    cpu = run_ez80_until(builder, "HELLO", "INFER")
+    for addr in range(builder.labels["INBUF"], builder.labels["INBUF"] + 256 * 3):
+        cpu.poke(addr, 0)
+
+    # The scan should produce a list holding nothing but its terminator. Check
+    # that before the epilogue reuses the buffer for the next layer's list.
+    cpu.run(max_cycles=10_000_000, stop_pc=builder.labels["LAYER1"])
+    assert cpu.pc == builder.labels["LAYER1"]
+    assert cpu.peek_word(builder.labels["COLLIST"], 3) == builder.labels["LEPI1"]
+
+    cpu.run(max_cycles=10_000_000, stop_pc=builder.labels["ARGMAX"])
+    assert cpu.pc == builder.labels["ARGMAX"]
+
+    got = read24(cpu, builder.labels["OUTBUF"], model.output_size)
+    want = libinfer.forward(model, np.zeros(256, dtype=np.int64), accum_bits=24)
+    np.testing.assert_array_equal(got, want)
+
+
+def test_column_feeding_more_than_256_neurons(tmp_path, model_factory):
+    """No DJNZ-shaped cap on how many neurons one input may feed."""
+    model = model_factory([256, 300], charset=" AB\x00", seed=71)
+    model.weights[0][:, 5] = 1  # column 5 feeds all 300 neurons
+    path = str(tmp_path / "fan.npz")
+    model.save_npz(path)
+
+    builder = build(path, "column", max_output_len=1)
+    cpu = run_ez80_until(builder, "HELLO", "ARGMAX")
+    got = read24(cpu, builder.labels["OUTBUF"], model.output_size)
+    want = libinfer.forward(model, reference_input("HELLO"), accum_bits=24)
+    np.testing.assert_array_equal(got, want)
+
+
+def test_column_kernel_leaves_the_stack_where_it_found_it(tiny_model_path):
+    """Threading on IY rather than SP is what keeps CALL and RET usable."""
+    builder = build(tiny_model_path, "column")
+    before = run_ez80_until(builder, "HELLO", "LAYER1").sp
+    after = run_ez80_until(builder, "HELLO", "ARGMAX").sp
+    assert before == after
 
 
 @pytest.mark.slow
