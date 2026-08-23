@@ -8,6 +8,24 @@ for Z80 development.
 from __future__ import annotations
 
 
+def _byte(val: int) -> int:
+    """Range-check an immediate that has to fit in one byte.
+
+    Silently masking here is how the eZ80 ARGMAX loop came to emit `LD B,43`
+    for a 299-entry output layer and truncate its own scan.
+    """
+    if not 0 <= val <= 255:
+        raise ValueError(f"byte immediate out of range: {val}")
+    return val
+
+
+def _disp(val: int) -> int:
+    """Range-check a signed index displacement, as in `LD A,(IX+d)`."""
+    if not -128 <= val <= 127:
+        raise ValueError(f"index displacement out of range: {val}")
+    return val & 0xFF
+
+
 class Z80Builder:
     """Simple Z80 code builder with label support"""
 
@@ -18,7 +36,8 @@ class Z80Builder:
         self.org = org
         self.code = bytearray()
         self.labels: dict[str, int] = {}
-        self.fixups: list[tuple[int, str, str]] = []  # (offset, label, type)
+        # (offset, label, type, addend)
+        self.fixups: list[tuple[int, str, str, int]] = []
 
     def addr(self) -> int:
         return self.org + len(self.code)
@@ -44,22 +63,27 @@ class Z80Builder:
         if overage:
             self.ds(boundary - overage)
 
-    def fixup_word(self, label: str) -> None:
-        """Emit placeholder address, record fixup"""
-        self.fixups.append((len(self.code), label, 'abs'))
+    def fixup_word(self, label: str, addend: int = 0) -> None:
+        """Emit placeholder address, record fixup.
+
+        ``addend`` is added to the label's value when the fixup is applied, so
+        code can name ``BUF + 3*i`` without the builder inventing a label per
+        element.  Unrolled kernels lean on this heavily.
+        """
+        self.fixups.append((len(self.code), label, "abs", addend))
         self.emit(*([0] * self.addr_size))
 
     def fixup_rel(self, label: str) -> None:
         """Emit placeholder byte for relative jump"""
-        self.fixups.append((len(self.code), label, 'rel'))
+        self.fixups.append((len(self.code), label, 'rel', 0))
         self.emit(0)
 
     def resolve(self) -> None:
         """Apply all fixups"""
-        for offset, label, ftype in self.fixups:
+        for offset, label, ftype, addend in self.fixups:
             if label not in self.labels:
                 raise ValueError(f"Unknown label: {label}")
-            target = self.labels[label]
+            target = self.labels[label] + addend
 
             if ftype == 'abs':
                 for k in range(self.addr_size):
@@ -124,6 +148,8 @@ class Z80Builder:
         self.emit(0xFA)
         self.fixup_word(label)
 
+    def jp_hl(self) -> None: self.emit(0xE9)  # JP (HL) - jump to the address in HL
+
     def jr(self, label: str) -> None:
         self.emit(0x18)
         self.fixup_rel(label)
@@ -180,20 +206,20 @@ class Z80Builder:
         self.emit(0xFD, 0x21)
         self.fixup_word(label)
 
-    def ld_a_n(self, val: int) -> None: self.emit(0x3E, val & 0xFF)
-    def ld_b_n(self, val: int) -> None: self.emit(0x06, val & 0xFF)
-    def ld_c_n(self, val: int) -> None: self.emit(0x0E, val & 0xFF)
-    def ld_d_n(self, val: int) -> None: self.emit(0x16, val & 0xFF)
-    def ld_e_n(self, val: int) -> None: self.emit(0x1E, val & 0xFF)
-    def ld_hl_n(self, val: int) -> None: self.emit(0x36, val & 0xFF)
+    def ld_a_n(self, val: int) -> None: self.emit(0x3E, _byte(val))
+    def ld_b_n(self, val: int) -> None: self.emit(0x06, _byte(val))
+    def ld_c_n(self, val: int) -> None: self.emit(0x0E, _byte(val))
+    def ld_d_n(self, val: int) -> None: self.emit(0x16, _byte(val))
+    def ld_e_n(self, val: int) -> None: self.emit(0x1E, _byte(val))
+    def ld_hl_n(self, val: int) -> None: self.emit(0x36, _byte(val))
 
-    def ld_hl_mem_label(self, label: str) -> None:
+    def ld_hl_mem_label(self, label: str, addend: int = 0) -> None:
         self.emit(0x2A)
-        self.fixup_word(label)
+        self.fixup_word(label, addend)
 
-    def ld_mem_label_hl(self, label: str) -> None:
+    def ld_mem_label_hl(self, label: str, addend: int = 0) -> None:
         self.emit(0x22)
-        self.fixup_word(label)
+        self.fixup_word(label, addend)
 
     def ld_mem_label_de(self, label: str) -> None:
         self.emit(0xED, 0x53)
@@ -203,9 +229,9 @@ class Z80Builder:
         self.emit(0xED, 0x43)
         self.fixup_word(label)
 
-    def ld_bc_mem_label(self, label: str) -> None:
+    def ld_bc_mem_label(self, label: str, addend: int = 0) -> None:
         self.emit(0xED, 0x4B)
-        self.fixup_word(label)
+        self.fixup_word(label, addend)
 
     def ld_mem_label_sp(self, label: str) -> None:
         self.emit(0xED, 0x73)
@@ -247,6 +273,8 @@ class Z80Builder:
     def ld_ixd_h(self, d: int) -> None: self.emit(0xDD, 0x74, d & 0xFF)  # LD (IX+d),H
     def ld_iyd_l(self, d: int) -> None: self.emit(0xFD, 0x75, d & 0xFF)  # LD (IY+d),L
     def ld_iyd_h(self, d: int) -> None: self.emit(0xFD, 0x74, d & 0xFF)  # LD (IY+d),H
+    def ld_a_iyd(self, d: int) -> None: self.emit(0xFD, 0x7E, _disp(d))  # LD A,(IY+d)
+    def ld_iyd_a(self, d: int) -> None: self.emit(0xFD, 0x77, _disp(d))  # LD (IY+d),A
 
     def ld_sp_hl(self) -> None: self.emit(0xF9)
     def ld_sp_ix(self) -> None: self.emit(0xDD, 0xF9)
@@ -259,7 +287,7 @@ class Z80Builder:
     def and_n(self, val: int) -> None: self.emit(0xE6, val & 0xFF)
     def or_a(self) -> None: self.emit(0xB7)
     def xor_a(self) -> None: self.emit(0xAF)
-    def cp_n(self, val: int) -> None: self.emit(0xFE, val & 0xFF)
+    def cp_n(self, val: int) -> None: self.emit(0xFE, _byte(val))
     def sbc_hl_de(self) -> None: self.emit(0xED, 0x52)
     def sbc_hl_bc(self) -> None: self.emit(0xED, 0x42)  # SBC HL,BC
     def inc_bc(self) -> None: self.emit(0x03)
@@ -294,6 +322,8 @@ class Z80Builder:
     def add_hl_bc(self) -> None: self.emit(0x09)  # HL = HL + BC
     def add_hl_de(self) -> None: self.emit(0x19)  # HL = HL + DE
     def add_hl_sp(self) -> None: self.emit(0x39)  # HL = HL + SP
+    def add_ix_de(self) -> None: self.emit(0xDD, 0x19)  # IX = IX + DE
+    def add_iy_de(self) -> None: self.emit(0xFD, 0x19)  # IY = IY + DE
 
     # Bit
     def bit_7_c(self) -> None: self.emit(0xCB, 0x79)

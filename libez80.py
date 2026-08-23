@@ -14,7 +14,7 @@ pointers use.
 
 from __future__ import annotations
 
-from libz80 import Z80Builder
+from libz80 import Z80Builder, _disp
 
 # Agon MOS loads .bin programs here and enters at the first byte.
 AGON_LOAD_ADDR = 0x040000
@@ -39,16 +39,52 @@ class EZ80Builder(Z80Builder):
 
     # --- loads the base class doesn't cover ---------------------------------
 
-    def ld_de_mem_label(self, label: str) -> None:
+    def ld_de_mem_label(self, label: str, addend: int = 0) -> None:
         self.emit(0xED, 0x5B)
-        self.fixup_word(label)
+        self.fixup_word(label, addend)
 
-    def ld_ix_mem_label(self, label: str) -> None:
+    def ld_ix_mem_label(self, label: str, addend: int = 0) -> None:
         self.emit(0xDD, 0x2A)
-        self.fixup_word(label)
+        self.fixup_word(label, addend)
 
     def ld_ixd_a(self, d: int) -> None:
         self.emit(0xDD, 0x77, d & 0xFF)
+
+    # --- eZ80 register-pair indexed loads ------------------------------------
+    #
+    # The eZ80 adds LD rr,(IX+d) and LD (IX+d),rr for BC/DE/HL, which move a
+    # whole 24-bit word in one instruction.  Opcodes 07/0F/17/1F/27/2F under a
+    # DD or FD prefix; on a plain Z80 those same encodings are RLCA/RRCA/... with
+    # the prefix ignored, so they only mean this in ADL mode.
+    #
+    # Encodings per the eZ80 opcode list at
+    # https://mdfs.net/Docs/Comp/eZ80/eZ80OpList (Zilog UM0077 has the same
+    # table).  The column-major kernel uses the HL forms as its accumulator
+    # read-modify-write.
+
+    def ld_hl_ixd(self, d: int) -> None:
+        """LD HL,(IX+d) - load 24 bits."""
+        self.emit(0xDD, 0x27, _disp(d))
+
+    def ld_ixd_hl(self, d: int) -> None:
+        """LD (IX+d),HL - store 24 bits."""
+        self.emit(0xDD, 0x2F, _disp(d))
+
+    def ld_hl_iyd(self, d: int) -> None:
+        """LD HL,(IY+d) - load 24 bits."""
+        self.emit(0xFD, 0x27, _disp(d))
+
+    def ld_iyd_hl(self, d: int) -> None:
+        """LD (IY+d),HL - store 24 bits."""
+        self.emit(0xFD, 0x2F, _disp(d))
+
+    def ld_de_ixd(self, d: int) -> None:
+        """LD DE,(IX+d) - load 24 bits."""
+        self.emit(0xDD, 0x17, _disp(d))
+
+    def ld_ixd_de(self, d: int) -> None:
+        """LD (IX+d),DE - store 24 bits."""
+        self.emit(0xDD, 0x1F, _disp(d))
 
     # --- shifts on memory ----------------------------------------------------
 

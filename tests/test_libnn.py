@@ -127,7 +127,7 @@ def test_routines_address_the_buffer_the_platform_names():
     plat = FakePlatform()
     b = Z80Builder()
     libnn.emit_tokenizer(b, plat)
-    referenced = {label for _offset, label, _kind in b.fixups}
+    referenced = {label for _offset, label, _kind, _addend in b.fixups}
     assert "TESTBUF" in referenced
     assert "INBUF" not in referenced
 

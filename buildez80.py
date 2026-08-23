@@ -192,8 +192,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.call('INFER')
     b.call('ARGMAX')
 
-    b.ld_a_mem_label('RESULT')
-    b.cp_n(eos_idx)
+    b.ld_hl_mem_label('RESULT')
+    b.ld_bc_nn(eos_idx)
+    b.or_a()
+    b.sbc_hl_bc()
     b.ret_z()
 
     b.call('PRINTCH')
@@ -207,10 +209,8 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
 
     # === PRINTCH =============================================================
     b.label('PRINTCH')
-    b.ld_a_mem_label('RESULT')
     b.ld_hl_label('CHARTBL')
-    b.ld_bc_nn(0)
-    b.ld_c_a()
+    b.ld_bc_mem_label('RESULT')
     b.add_hl_bc()
     b.ld_a_hl()
     b.rst(MOS_OUTCHAR)
@@ -321,35 +321,51 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.ret()
 
     # === ARGMAX ==============================================================
+    # First-wins argmax over OUTBUF, matching libinfer.argmax.
+    #
+    # SP walks the buffer so each POP reads a 24-bit logit and advances in one
+    # instruction; the loop ends by comparing SP against OUTEND rather than
+    # counting in B.  A byte counter is what limited this to 256 outputs while
+    # the module advertised no width limit at all, and it failed silently: a
+    # 299-entry charset assembled to `LD B,43` and argmaxed over the first 44
+    # logits.  Index and result are 24-bit for the same reason.
     b.label('ARGMAX')
     b.ld_mem_label_sp('SPSAV')
     b.di()
     b.ld_sp_label('OUTBUF')
-    b.pop_de()  # running maximum
-    b.xor_a()
-    b.ld_mem_label_a('MAXI')
-    b.ld_b_n(output_size - 1)
-    b.ld_c_n(1)
+    b.ld_hl_nn(0)
+    b.ld_mem_label_hl('MAXI')
+    b.ld_mem_label_hl('IDX')
+    b.pop_de()  # running maximum = OUTBUF[0]
 
     b.label('AMLP')
+    b.ld_mem_label_sp('SPTMP')
+    b.ld_hl_mem_label('SPTMP')
+    b.ld_bc_label('OUTEND')
+    b.or_a()
+    b.sbc_hl_bc()
+    b.jp_z('AMDONE')
+
+    b.ld_hl_mem_label('IDX')
+    b.inc_hl()
+    b.ld_mem_label_hl('IDX')
+
     b.pop_hl()
     b.ld_mem_label_hl('TMPV')
     b.or_a()
     b.sbc_hl_de()
-    b.jp_m('AMSK')
-    b.jr_z('AMSK')
+    b.jp_m('AMLP')  # below the running maximum
+    b.jp_z('AMLP')  # equal: the earlier index wins
     b.ld_de_mem_label('TMPV')
-    b.ld_a_c()
-    b.ld_mem_label_a('MAXI')
+    b.ld_hl_mem_label('IDX')
+    b.ld_mem_label_hl('MAXI')
+    b.jp('AMLP')
 
-    b.label('AMSK')
-    b.inc_c()
-    b.djnz('AMLP')
-
+    b.label('AMDONE')
     b.ld_sp_mem_label('SPSAV')
     b.ei()
-    b.ld_a_mem_label('MAXI')
-    b.ld_mem_label_a('RESULT')
+    b.ld_hl_mem_label('MAXI')
+    b.ld_mem_label_hl('RESULT')
     b.ret()
 
     # === LOWER: fold A-Z to lower case, everything else untouched ============
@@ -503,10 +519,8 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.ld_bc_nn(CONTEXT_LEN - 1)
     b.ldir()
 
-    b.ld_a_mem_label('RESULT')
     b.ld_hl_label('CHARTBL')
-    b.ld_bc_nn(0)
-    b.ld_c_a()
+    b.ld_bc_mem_label('RESULT')
     b.add_hl_bc()
     b.ld_a_hl()
     b.call('LOWER')
@@ -596,7 +610,7 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
         b.db(0 if c == '\x00' else ord(c))
 
     for name in ('TOKLEN', 'TOKC1', 'TOKC2', 'TOKC3', 'CTXPOS', 'CTXN',
-                 'MAXI', 'RESULT', 'GENCNT', 'RELUF', 'INPLEN'):
+                 'GENCNT', 'RELUF', 'INPLEN'):
         b.label(name)
         b.db(0)
 
@@ -605,7 +619,10 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
         b.label(name)
         b.db(0)
 
-    for name in ('SPSAV', 'INBASE', 'BIASP', 'TMPV'):
+    # MAXI/RESULT are 24-bit so the output layer may be any width; the rest are
+    # pointers and scratch that were already 24-bit.
+    for name in ('SPSAV', 'SPTMP', 'INBASE', 'BIASP', 'TMPV', 'MAXI', 'IDX',
+                 'RESULT'):
         b.label(name)
         b.d24(0)
 
@@ -632,7 +649,9 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.label('BUF_B')
     b.ds(max_hidden * 3 + 3)
     b.label('OUTBUF')
-    b.ds(output_size * 3 + 3)
+    b.ds(output_size * 3)
+    b.label('OUTEND')
+    b.ds(3)
 
     b.label('BIASES')
     b.blob(bias_blob)

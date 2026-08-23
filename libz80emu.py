@@ -498,6 +498,31 @@ class Z80:
 
     # --- decoder -------------------------------------------------------------
 
+    def _ez80_idx_rp(self, op: int, idx: str) -> None:
+        """LD rr,(IX+d) / LD (IX+d),rr for rr in BC, DE, HL, IX/IY."""
+        disp = self._imm_signed()
+        addr = ((self.ix if idx == "ix" else self.iy) + disp) & self.amask
+        pair = op >> 4  # 0=BC 1=DE 2=HL 3=the index register itself
+        store = bool(op & 0x08)
+        if store:
+            if pair == 3:
+                val = self.ix if idx == "ix" else self.iy
+            else:
+                val = (self.bc, self.de, self.hl)[pair]
+            self._ww(addr, val)
+            return
+        val = self._rw(addr)
+        if pair == 0:
+            self.bc = val
+        elif pair == 1:
+            self.de = val
+        elif pair == 2:
+            self.hl = val
+        elif idx == "ix":
+            self.ix = val
+        else:
+            self.iy = val
+
     def _execute(self, op: int, idx: str | None) -> None:
         # eZ80 instruction-mode suffixes (.SIS/.LIS/.SIL/.LIL)
         if self.adl and idx is None and op in (0x40, 0x49, 0x52, 0x5B):
@@ -516,6 +541,15 @@ class Z80:
             return
         if op == 0xCB:
             self._execute_cb(idx)
+            return
+
+        # eZ80 register-pair indexed loads: LD rr,(IX+d) and LD (IX+d),rr for
+        # BC/DE/HL/IX, moving a whole 24-bit word in one instruction. These sit
+        # at 07/0F/17/1F/27/2F/37/3F under a DD or FD prefix, where a plain Z80
+        # would see RLCA/RRCA/... and discard the prefix - so they exist only in
+        # ADL mode. Encodings per https://mdfs.net/Docs/Comp/eZ80/eZ80OpList.
+        if self.adl and idx is not None and (op & 0x07) == 0x07 and op < 0x40:
+            self._ez80_idx_rp(op, idx)
             return
 
         x, y, z = op >> 6, (op >> 3) & 7, op & 7

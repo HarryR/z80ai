@@ -10,35 +10,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from helpers import read_words
+from helpers import run_cpm_until as run_until
 
 import buildz80com
 import libinfer
-from libhost import CPMHost
-from libz80emu import Z80
-
-
-def _s16(lo: int, hi: int) -> int:
-    v = lo | (hi << 8)
-    return v - 0x10000 if v & 0x8000 else v
-
-
-def read_words(cpu: Z80, addr: int, count: int) -> np.ndarray:
-    return np.array(
-        [_s16(cpu.peek(addr + 2 * i), cpu.peek(addr + 2 * i + 1)) for i in range(count)],
-        dtype=np.int64,
-    )
-
-
-def run_until(builder, query: str, label: str) -> Z80:
-    """Run a freshly built .COM up to ``label`` with ``query`` on the cmdline."""
-    image = builder.build()
-    host = CPMHost(cmdline=query)
-    cpu = host.cpu
-    cpu.load(0x0100, image)
-    cpu.pc = 0x0100
-    cpu.run(max_cycles=400_000_000, stop_pc=builder.labels[label])
-    assert cpu.pc == builder.labels[label], "never reached " + label
-    return cpu
 
 
 @pytest.fixture(scope="module")

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from helpers import read24 as _read24
+from helpers import run_ez80_until as run_until
 
 import buildez80
 import buildz80com
 import libinfer
 from libez80 import AGON_LOAD_ADDR, EZ80Builder
-from libhost import AgonHost, run_agon, run_cpm
+from libhost import run_agon, run_cpm
 from libz80emu import Z80
 
 GEN_LEN = 6
@@ -135,22 +137,6 @@ def test_ez80_and_z80_agree_when_the_accumulator_does_not_wrap(
         assert cpm_out in agon_reply(ez80, query)
 
 
-def _read24(cpu: Z80, addr: int, count: int) -> np.ndarray:
-    vals = []
-    for i in range(count):
-        v = sum(cpu.peek(addr + 3 * i + k) << (8 * k) for k in range(3))
-        vals.append(v - 0x1000000 if v & 0x800000 else v)
-    return np.array(vals, dtype=np.int64)
-
-
-def run_until(builder, query: str, label: str) -> Z80:
-    host = AgonHost(stdin=[query, "!"])
-    cpu = host.cpu
-    cpu.load(AGON_LOAD_ADDR, builder.build())
-    cpu.pc = AGON_LOAD_ADDR
-    cpu.run(max_cycles=400_000_000, stop_pc=builder.labels[label])
-    assert cpu.pc == builder.labels[label]
-    return cpu
 
 
 @pytest.mark.parametrize("query", QUERIES)

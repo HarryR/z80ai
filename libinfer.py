@@ -141,6 +141,28 @@ def wrap(v: np.ndarray | int, bits: int) -> np.ndarray | int:
     return ((np.asarray(v, dtype=np.int64) + half) & ((1 << bits) - 1)) - half
 
 
+def forward_layers(
+    model: Model, x: np.ndarray, accum_bits: int = 16
+) -> list[np.ndarray]:
+    """Every layer's activation, after the shift and the ReLU.
+
+    ``forward`` returns the last of these.  Tests use the intermediate ones to
+    compare a backend's hidden buffers layer by layer, which turns "the text is
+    wrong" into "layer 2 is wrong" - the difference between a bug you can find
+    and a bug you can only stare at.
+    """
+    acc = np.asarray(x, dtype=np.int64)
+    last = model.num_layers - 1
+    out: list[np.ndarray] = []
+    for i, (w, bias) in enumerate(zip(model.weights, model.biases, strict=True)):
+        acc = wrap(w.astype(np.int64) @ acc + bias.astype(np.int64), accum_bits)
+        acc = acc >> SHIFT  # arithmetic shift: floors, like SRA H / RR L
+        if i != last:
+            acc = np.maximum(acc, 0)
+        out.append(acc.astype(np.int64))
+    return out
+
+
 def forward(model: Model, x: np.ndarray, accum_bits: int = 16) -> np.ndarray:
     """Run integer inference; returns the final layer.
 
@@ -149,14 +171,7 @@ def forward(model: Model, x: np.ndarray, accum_bits: int = 16) -> np.ndarray:
     on any model whose activations stay inside 16 bits, which is exactly what
     the QAT overflow penalty trains for.
     """
-    acc = np.asarray(x, dtype=np.int64)
-    last = model.num_layers - 1
-    for i, (w, bias) in enumerate(zip(model.weights, model.biases, strict=True)):
-        acc = wrap(w.astype(np.int64) @ acc + bias.astype(np.int64), accum_bits)
-        acc = acc >> SHIFT  # arithmetic shift: floors, like SRA H / RR L
-        if i != last:
-            acc = np.maximum(acc, 0)
-    return acc.astype(np.int64)
+    return forward_layers(model, x, accum_bits)[-1]
 
 
 #: Widest layer a Z80 backend can emit: its neuron loop counts in B, and DJNZ

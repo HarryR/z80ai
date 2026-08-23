@@ -77,6 +77,17 @@ def test_check_fits_reports_the_overrun_size():
         va.check_fits(0x8000, 0x8000 + 100, 0x10000, "the top of RAM")
 
 
+def test_agon_images_are_checked_against_sram_not_the_16mb_address_space():
+    """A .bin can be addressable and still be unloadable on a real Agon."""
+    top = va.AGON_SRAM_TOP - va.AGON_STACK_MARGIN
+    usable = top - va.AGON_LOAD
+    assert usable < 0x1000000, "the bound must be SRAM, not the address space"
+
+    va.check_fits(va.AGON_LOAD, usable, top, "the top of Agon SRAM")
+    with pytest.raises(va.VerificationError, match="past the top of Agon SRAM"):
+        va.check_fits(va.AGON_LOAD, usable + 1, top, "the top of Agon SRAM")
+
+
 def test_every_known_artifact_names_a_model_that_exists(examples_dir):
     import os
 

@@ -32,14 +32,16 @@ GOLDEN = {
                   "1c26b542228fff147991e4b2b8c1e92652d46b4fb8b9eeafbb0442169b085a5a"),
     "GUESS-FAST.COM": (buildfastz80com, "guess",
                        "cd12b1f6055558a9a2ae2f6b241c6c7e5229f1cc325efacbd61842d00f2ef3ac"),
+    # Changed when eZ80 ARGMAX stopped counting neurons in B: the scan is no
+    # longer capped at 256 outputs, and MAXI/RESULT widened to 24 bits.
     "GUESS.bin": (buildez80, "guess",
-                  "8556a8f9d323760370ef15992ac38c1115558bb2c49c626f2ab9df05175fe0c1"),
+                  "d82e44dc90a795892dfd8412d291d3988a0f8920196ed33b6edb052a9ac7827a"),
     "CHAT.COM": (buildz80com, "tinychat",
                  "d7acba3d23bd5ed94e5028855f01d82fff918766bd2907c8b9c3ae1499c4cd70"),
     "CHAT-FAST.COM": (buildfastz80com, "tinychat",
                       "788d571fd54bf0aa459732428ecc84c62d48038bc03466d4de3e2309ab106e6e"),
     "CHAT.bin": (buildez80, "tinychat",
-                 "502f5d94ee43339079023161ffb3dc1ea92f12767af22797e3f91ceb28fc9207"),
+                 "2253060da5411f8f6ecfaec78ebd4341a6ef5980add1cba9ec578b104cc6c363"),
 }
 
 # The .TAP hashes cover the container, not the raw image, so they are checked
