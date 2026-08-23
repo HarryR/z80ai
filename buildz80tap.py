@@ -232,11 +232,13 @@ def build_autoreg(model_path: str = 'command_model_autoreg.pt',
     b.cp_n(32)
     b.jr_c('RI_LOOP')
 
-    # Check if buffer full
-    b.push_af()
+    # Check if buffer full.  Stash the character in C rather than on the stack:
+    # POP AF restores the flags from before the CP, so the branch below would
+    # test the CP 32 above instead.  LD A,C preserves flags.
+    b.ld_c_a()
     b.ld_a_mem_label('INPLEN')
     b.cp_b()
-    b.pop_af()
+    b.ld_a_c()
     b.jr_nc('RI_LOOP')  # Buffer full, ignore
 
     # Store character
