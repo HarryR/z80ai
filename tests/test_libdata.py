@@ -8,6 +8,10 @@ and a split that leaks queries would hide it just as well.
 
 from __future__ import annotations
 
+import os
+import sys
+from collections import Counter
+
 import pytest
 
 import libdata
@@ -141,5 +145,44 @@ def test_accuracy_ceiling_of_an_empty_set_is_one():
 def test_contradictions_reports_the_conflicting_labels():
     pairs = [("A B", "YES"), ("A B", "NO"), ("C D", "OK")]
     assert libdata.contradictions(pairs) == {"A B": {"YES", "NO"}}
+
+
+# --- the shipped dataset -----------------------------------------------------
+
+
+def test_adventure_dataset_is_clean(repo_root):
+    """A dataset the docs hold up as an example has to actually be one."""
+    path = os.path.join(repo_root, "data", "adventure", "commands.txt")
+    pairs = libdata.read_files([path])
+
+    assert len(pairs) > 1000
+    assert libdata.contradictions(pairs) == {}
+    assert libdata.accuracy_ceiling(pairs) == 1.0
+    assert len(pairs) == len({q for q, _ in pairs}), "duplicate queries"
+
+    labels = {r for _, r in pairs}
+    assert len(labels) <= 50, "too many distinct responses for a 2-bit model"
+    assert max(len(r) for r in labels) <= 12
+
+    # Balanced by construction: no label may become the model's default answer.
+    counts = Counter(r for _, r in pairs)
+    assert max(counts.values()) / len(pairs) <= 0.40
+
+
+def test_adventure_dataset_matches_its_generator(repo_root):
+    """The checked-in file must be exactly what generate.py produces.
+
+    This is the property the other two generators in this repo do not have:
+    both need a network service, neither is seeded, and neither one's output is
+    checked in, so nobody can reproduce the data behind the shipped models.
+    """
+    sys.path.insert(0, os.path.join(repo_root, "data", "adventure"))
+    import generate
+
+    pairs = generate.build(per_label=700, seed=0)
+    checked_in = libdata.read_files(
+        [os.path.join(repo_root, "data", "adventure", "commands.txt")]
+    )
+    assert pairs == checked_in, "commands.txt is stale; regenerate it"
 
 
