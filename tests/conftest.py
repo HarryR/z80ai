@@ -82,6 +82,11 @@ def examples_dir() -> str:
 
 
 @pytest.fixture(scope="session")
+def repo_root() -> str:
+    return REPO
+
+
+@pytest.fixture(scope="session")
 def guess_model_path() -> str:
     path = os.path.join(EXAMPLES, "guess", "model.npz")
     if not os.path.exists(path):

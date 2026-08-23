@@ -21,6 +21,7 @@ import torch
 import torch.nn as nn
 
 import libinfer
+from libdata import accuracy_ceiling, load_pairs, split_pairs
 from libqat import OverflowAwareLinear
 
 # Character set - built dynamically from training data
@@ -271,41 +272,10 @@ def generate_response(model: AutoregressiveModel, query: str,
 
 
 
-def parse_pair(line: str) -> tuple[str, str] | None:
-    """Parse a single line into (query, response) or None if invalid."""
-    line = line.strip()
-    if '|' not in line:
-        return None
-
-    parts = line.split('|', 1)
-    if len(parts) != 2:
-        return None
-
-    query = parts[0].strip().upper()
-    response = parts[1].strip().upper()
-
-    if len(query) >= 2 and len(response) >= 1:
-        # Truncate smartly
-        if len(query) > 60:
-            query = query[:60].rsplit(' ', 1)[0] if ' ' in query[40:60] else query[:60]
-        if len(response) > 50:
-            response = response[:50].rsplit(' ', 1)[0] if ' ' in response[30:50] else response[:50]
-        return (query, response)
-
-    return None
-
-
 def load_chunk(stdin: Iterable[str],
                chunk_size: int = 0) -> list[tuple[str, str]]:
     """Load up to chunk_size pairs from stdin (0 = all)."""
-    pairs = []
-    for line in stdin:
-        pair = parse_pair(line)
-        if pair:
-            pairs.append(pair)
-            if chunk_size > 0 and len(pairs) >= chunk_size:
-                break
-    return pairs
+    return load_pairs(stdin, chunk_size)
 
 
 def validate_charset(pairs: list[tuple[str, str]], charset: str) -> None:
@@ -341,7 +311,8 @@ def parse_hidden_sizes(spec: str) -> list[int]:
 
 def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float = 0.01,
                   save_best: bool = False, hidden_sizes: list[int] | None = None,
-                  checkpoint_file: str = 'command_model_autoreg.pt'):
+                  checkpoint_file: str = 'command_model_autoreg.pt',
+                  val_frac: float = 0.1, seed: int = 0):
     """Train incrementally on chunks of data from stdin."""
     global CHARSET, CHAR_TO_IDX, IDX_TO_CHAR, EOS_IDX, NUM_CHARS
     import sys
@@ -357,12 +328,26 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
         print("No training data!")
         return None
 
+    # Hold out validation queries before chunking, so nothing trains on them.
+    train_pairs, val_pairs = split_pairs(all_pairs, val_frac, seed)
+    total_pairs = len(train_pairs)
+    if total_pairs == 0:
+        print("No training data left after the validation split!")
+        return None
+
     # Calculate chunks
     if chunk_size <= 0:
         chunk_size = total_pairs
     total_chunks = (total_pairs + chunk_size - 1) // chunk_size
 
-    print(f"Loaded {total_pairs} pairs → {total_chunks} chunks of {chunk_size}")
+    print(f"Loaded {len(all_pairs)} pairs → {total_pairs} train / {len(val_pairs)} val "
+          f"→ {total_chunks} chunks of {chunk_size}")
+    if val_pairs:
+        print(f"Ceiling from contradictory labels: "
+              f"train {accuracy_ceiling(train_pairs):.1%}, "
+              f"val {accuracy_ceiling(val_pairs):.1%}")
+    else:
+        print("No validation split - accuracy below is measured on training data")
     print(f"Epochs per chunk: {epochs_per_chunk}")
     print("=" * 60)
 
@@ -378,6 +363,18 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
     context_encoder = ContextEncoder(num_buckets=128, context_len=8)
     if hidden_sizes is None:
         hidden_sizes = [256, 192, 128]
+
+    # Encode the held-out set once; it never changes.
+    X_val = y_val = None
+    if val_pairs:
+        val_examples = []
+        for query, response in val_pairs:
+            val_examples.extend(
+                create_training_examples(query, response, query_encoder, context_encoder)
+            )
+        X_val = torch.tensor(np.stack([ex[0] for ex in val_examples]), dtype=torch.float32)
+        y_val = torch.tensor(np.array([ex[1] for ex in val_examples]), dtype=torch.long)
+        print(f"Validation: {len(val_pairs)} pairs → {len(val_examples)} character examples")
 
     model = None
     total_epochs = 0
@@ -417,7 +414,7 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
     for chunk_num in range(total_chunks):
         start_idx = chunk_num * chunk_size
         end_idx = min(start_idx + chunk_size, total_pairs)
-        chunk = all_pairs[start_idx:end_idx]
+        chunk = train_pairs[start_idx:end_idx]
 
         print(f"\n--- Chunk {chunk_num + 1}/{total_chunks}: {len(chunk)} pairs ---")
 
@@ -458,22 +455,34 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
                     with torch.no_grad():
                         preds = outputs.argmax(dim=1)
                         acc = (preds == y).float().mean()
-                        int_outputs = model(X, use_int=True)
-                        int_preds = int_outputs.argmax(dim=1)
-                        int_acc = (int_preds == y).float().mean()
+                        int_acc = (model(X, use_int=True).argmax(dim=1) == y).float().mean()
+
+                        # The number that decides which checkpoint to keep is
+                        # the held-out one when there is one. Selecting on the
+                        # training score just picks whichever epoch memorized
+                        # hardest.
+                        val_int_acc = None
+                        if X_val is not None:
+                            model.eval()
+                            val_int_acc = (
+                                model(X_val, use_int=True).argmax(dim=1) == y_val
+                            ).float().mean().item()
+                            model.train()
+                        score = val_int_acc if val_int_acc is not None else int_acc.item()
 
                         current_epoch = total_epochs + epoch + 1
-                        if int_acc.item() > best_int_acc:
-                            best_int_acc = int_acc.item()
+                        if score > best_int_acc:
+                            best_int_acc = score
                             best_epoch = current_epoch
                             best_state = {k: v.clone() for k, v in model.state_dict().items()}
                             marker = " *BEST*"
                         else:
                             marker = ""
 
+                        val_note = "" if val_int_acc is None else f", ValAcc={val_int_acc:.1%}"
                         print(f"  Epoch {current_epoch}: "
                               f"CE={ce_loss.item():.4f}, Acc={acc:.1%}, "
-                              f"IntAcc={int_acc:.1%}{marker}")
+                              f"IntAcc={int_acc:.1%}{val_note}{marker}")
 
             except KeyboardInterrupt:  # noqa: PERF203 - Ctrl+C must save the run
                 print("\nInterrupted!")
@@ -510,7 +519,8 @@ def train_chunked(chunk_size: int = 1000, epochs_per_chunk: int = 100, lr: float
 
     print(f"\n{'=' * 60}")
     print(f"Finished: {chunk_num + 1}/{total_chunks} chunks, {total_epochs} total epochs")
-    print(f"Best IntAcc: {best_int_acc:.1%} at epoch {best_epoch}")
+    measured_on = "held-out" if val_pairs else "TRAINING data"
+    print(f"Best IntAcc ({measured_on}): {best_int_acc:.1%} at epoch {best_epoch}")
     print("=" * 60)
 
     return model
@@ -534,6 +544,12 @@ if __name__ == '__main__':
     parser.add_argument('--output', '-o', type=str, default='command_model_autoreg.pt',
                         help='Checkpoint output path')
     parser.add_argument('--chat', action='store_true', help='Interactive chat after training')
+    parser.add_argument('--val-frac', type=float, default=0.1,
+                        help='Fraction of unique queries held out for validation '
+                             '(0 disables, and then accuracy is measured on the '
+                             'training data)')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Seed for the train/validation split')
     args = parser.parse_args()
 
     # If file specified, redirect stdin from file
@@ -549,6 +565,8 @@ if __name__ == '__main__':
         save_best=args.save_best,
         hidden_sizes=hidden_sizes,
         checkpoint_file=args.output,
+        val_frac=args.val_frac,
+        seed=args.seed,
     )
 
     # Interactive chat session
