@@ -35,6 +35,17 @@ A 20 Questions game where the model knows a secret topic and answers YES/NO/MAYB
 
 Includes tools for generating training data with LLMs (Ollama or Claude API) and balancing class distributions.
 
+### [data/adventure](data/adventure/)
+
+A text adventure command parser: 11,900 phrasings mapped onto 17 commands
+(`GO N`, `TAKE`, `OPEN`, `INV`, `IDK`, …), reaching 99.8% on held-out queries.
+Not an example binary — a dataset, and a worked example of the shape this
+architecture learns well. Its generator is deterministic and dependency-free, so
+the data can be reproduced byte for byte.
+
+See [data/README.md](data/README.md) for what makes a dataset suit a 2-bit
+model, and `data/lint.py` for checking one before you train it.
+
 ## Quickstart
 
 Get running in under 5 minutes:
